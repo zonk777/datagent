@@ -23,7 +23,7 @@ function fallbackStatusMessage(status: number, fallback = '请求失败') {
     404: '接口或资源不存在，请确认后端服务版本是否最新。',
     413: '上传文件过大，请压缩或拆分文件后重试。',
     422: '请求格式校验失败，请检查输入内容是否为空或格式不正确。',
-    429: '请求过于频繁或模型服务限流，请稍后再试。',
+    429: '请求过于频繁，服务正在限流，请稍后再试。',
     500: '后端服务内部错误，请查看后端控制台日志。',
     502: '后端网关/代理连接失败，请检查模型服务、代理或本地服务是否可用。',
     503: '后端服务暂不可用，请确认数据库、Qdrant、模型 API 是否已启动。',
@@ -59,6 +59,17 @@ function parseXhrError(status: number, responseText: string, fallback = '请求�
     }
   }
   return fallbackStatusMessage(status, fallback)
+}
+
+function uploadErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || '')
+  if (message.includes('429') || message.includes('请求过于频繁') || message.includes('Too Many Requests')) {
+    return '上传请求过于频繁，后端正在限流。请稍等片刻后继续上传；已上传分片会自动断点续传。'
+  }
+  if (message.includes('网络连接失败')) {
+    return '上传请求无法到达后端，请确认后端服务已启动、浏览器代理没有拦截 localhost，或刷新页面后重试。'
+  }
+  return message || '上传失败，请稍后重试。'
 }
 
 function networkErrorMessage(err: unknown, fallback = '网络连接失败') {
@@ -179,7 +190,12 @@ async function uploadSmallFile(
   form.append('file', file)
   if (name) form.append('name', name)
   form.append('description', description)
-  const result = await xhrFormRequest<Dataset>('/datasets/upload', form, onProgress, 0, file.size || 1, '正在上传文件')
+  let result: Dataset
+  try {
+    result = await xhrFormRequest<Dataset>('/datasets/upload', form, onProgress, 0, file.size || 1, '正在上传文件')
+  } catch (err) {
+    throw new Error(uploadErrorMessage(err))
+  }
   onProgress?.({ percent: 100, status: '上传完成，已生成数据集', uploadedBytes: file.size, totalBytes: file.size })
   return result
 }
@@ -216,14 +232,18 @@ async function uploadChunkedFile(
     form.append('total_chunks', String(totalChunks))
     form.append('total_size', String(file.size))
     form.append('filename', file.name)
-    await xhrFormRequest(
-      '/datasets/upload/chunk',
-      form,
-      onProgress,
-      uploadedBytes,
-      file.size,
-      `正在上传分片 ${index + 1}/${totalChunks}`,
-    )
+    try {
+      await xhrFormRequest(
+        '/datasets/upload/chunk',
+        form,
+        onProgress,
+        uploadedBytes,
+        file.size,
+        `正在上传分片 ${index + 1}/${totalChunks}`,
+      )
+    } catch (err) {
+      throw new Error(uploadErrorMessage(err))
+    }
     uploadedBytes += chunk.size
     received.add(index)
   }

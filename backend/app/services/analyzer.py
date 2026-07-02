@@ -4,7 +4,7 @@ import json
 import re
 import uuid
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -27,6 +27,7 @@ from .python_executor import execute_python_analysis
 from .react_agent import run_react_loop
 from .security import validate_readonly_sql
 from .sql_generator import FieldNotFoundError, generate_llm_sql, query_plan_source, repair_llm_sql
+from .field_aliases import field_mapping_notes, find_column_by_alias, resolve_field_references
 
 
 REGIONS = ["华东", "华南", "华北", "西南"]
@@ -41,6 +42,7 @@ class QueryPlan:
     series_field: str | None
     series_fields: list[str]
     time_description: str | None
+    field_mappings: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _dataset(dataset_id: int | None) -> dict:
@@ -85,11 +87,13 @@ def _column_profile(columns: list[dict]) -> dict[str, str | None]:
         (item["name"] for item in columns if not any(token in item["data_type"].lower() for token in numeric_types)),
         columns[0]["name"] if columns else None,
     )
+    influencer_dimension = find_column_by_alias(columns, "达人", numeric=False) or find_column_by_alias(columns, "达人")
     return {
         "date": _find_column(columns, ("date", "time", "日期", "时间")),
         "region": _find_column(columns, ("region", "area", "地区", "区域")),
         "product": _find_column(columns, ("product", "category", "产品", "品类", "类别")),
         "channel": _find_column(columns, ("channel", "渠道")),
+        "influencer": influencer_dimension,
         "sales": _find_column(columns, ("sales_amount", "revenue", "amount", "销售额", "营收", "成交金额"), True) or first_numeric,
         "orders": _find_column(columns, ("order_count", "orders", "订单数", "销量"), True),
         "profit": _find_column(columns, ("profit", "利润"), True),
@@ -101,28 +105,37 @@ def _column_profile(columns: list[dict]) -> dict[str, str | None]:
     }
 
 
-def _metric(question: str, profile: dict[str, str | None]) -> tuple[str, str, str]:
+def _metric(question: str, profile: dict[str, str | None], columns: list[dict]) -> tuple[str, str, str, list[dict[str, Any]]]:
     if "投诉" in question and profile["complaints"] and profile["orders"]:
         return (
             f"ROUND(100.0 * SUM({profile['complaints']}) / NULLIF(SUM({profile['orders']}), 0), 2)",
             "投诉率",
             "%",
+            [],
         )
     if "转化" in question and profile["conversions"] and profile["visits"]:
         return (
             f"ROUND(100.0 * SUM({profile['conversions']}) / NULLIF(SUM({profile['visits']}), 0), 2)",
             "转化率",
             "%",
+            [],
         )
     if "利润" in question and profile["profit"]:
-        return (f"ROUND(SUM({profile['profit']}), 2)", "毛利润", "元")
+        return (f"ROUND(SUM({profile['profit']}), 2)", "毛利润", "元", [])
     if ("订单" in question or "销量" in question) and profile["orders"]:
-        return (f"SUM({profile['orders']})", "订单数", "单")
+        return (f"SUM({profile['orders']})", "订单数", "单", [])
+    if any(term in question for term in ("销售额", "销售", "营收", "收入", "成交金额")) and profile["sales"]:
+        return (f"ROUND(SUM({profile['sales']}), 2)", "销售额", "元", [])
+    dynamic_metric = resolve_field_references(question, columns, numeric=True, limit=1, min_score=0.72)
+    if dynamic_metric:
+        match = dynamic_metric[0]
+        label = str(match.get("label") or match["column"])
+        return (f"ROUND(SUM({match['column']}), 2)", label, "", dynamic_metric)
     selected = profile["sales"] or profile["first_numeric"]
     if not selected:
         raise ValueError("当前数据集没有可聚合的数值字段")
     label = "销售额" if profile["sales"] == selected else str(selected)
-    return (f"ROUND(SUM({selected}), 2)", label, "元" if label == "销售额" else "")
+    return (f"ROUND(SUM({selected}), 2)", label, "元" if label == "销售额" else "", [])
 
 
 def _time_filter(question: str, date_column: str | None, table_name: str) -> tuple[list[str], list[Any], str | None]:
@@ -166,6 +179,7 @@ def _breakdowns(question: str, profile: dict[str, str | None]) -> list[tuple[str
         (("地区", "区域", "大区"), profile["region"], "区域"),
         (("产品", "展品", "品类", "类别"), profile["product"], "产品类别"),
         (("渠道",), profile["channel"], "渠道"),
+        (("达人", "主播", "kol", "koc", "博主", "网红", "创作者", "influencer", "creator", "talent"), profile["influencer"], "达人"),
     ]
     result: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -179,7 +193,7 @@ def _breakdowns(question: str, profile: dict[str, str | None]) -> list[tuple[str
 
 def _build_query(question: str, dataset: dict, limit: int) -> QueryPlan:
     profile = _column_profile(dataset["columns"])
-    metric_sql, metric_label, _ = _metric(question, profile)
+    metric_sql, metric_label, _, field_mappings = _metric(question, profile, dataset["columns"])
     table_name = dataset["table_name"]
     filters, params, time_description = _time_filter(question, profile["date"], table_name)
     for region in REGIONS:
@@ -188,6 +202,18 @@ def _build_query(question: str, dataset: dict, limit: int) -> QueryPlan:
             params.append(region)
 
     breakdowns = _breakdowns(question, profile)
+    seen_breakdown_columns = {column for column, _ in breakdowns}
+    for match in resolve_field_references(question, dataset["columns"], numeric=False, limit=3, min_score=0.66):
+        column = match["column"]
+        if column in seen_breakdown_columns:
+            if not any(item.get("column") == column and item.get("term") == match.get("term") for item in field_mappings):
+                field_mappings.append(match)
+            continue
+        if column == profile.get("date"):
+            continue
+        breakdowns.append((column, str(match.get("label") or column)))
+        seen_breakdown_columns.add(column)
+        field_mappings.append(match)
     is_monthly = any(word in question for word in ("按月", "每月", "月份", "月度"))
     is_time_series = bool(
         profile["date"]
@@ -232,6 +258,7 @@ def _build_query(question: str, dataset: dict, limit: int) -> QueryPlan:
         series_fields[0] if series_fields else None,
         series_fields,
         time_description,
+        field_mappings,
     )
 
 
@@ -290,6 +317,12 @@ def _extract_anchors(question: str) -> list[str]:
         "品类": "产品维度对比",
         "类别": "产品维度对比",
         "渠道": "渠道维度对比",
+        "达人": "达人维度对比",
+        "主播": "达人维度对比",
+        "KOL": "达人维度对比",
+        "kol": "达人维度对比",
+        "KOC": "达人维度对比",
+        "koc": "达人维度对比",
         "按月": "时间趋势",
         "每月": "时间趋势",
         "月度": "时间趋势",
@@ -737,6 +770,8 @@ def _build_data_chart_sections(
             dimension_queries.append(("product", "产品维度", f"{question} 按产品类别分析"))
         if profile.get("channel"):
             dimension_queries.append(("channel", "渠道维度", f"{question} 按渠道分析"))
+        if profile.get("influencer"):
+            dimension_queries.append(("influencer", "达人维度", f"{question} 按达人分析"))
         if profile.get("date"):
             dimension_queries.append(("time", "时间趋势", f"{question} 按月趋势分析"))
 
@@ -931,7 +966,7 @@ def _merge_followup(question: str, history: list[dict[str, Any]]) -> tuple[str, 
         "只按", "仅按", "不看地区", "不看区域", "去掉地区", "去掉区域", "不要地区", "不要区域",
     ))
     if dimension_replace:
-        merged_base = re.sub(r"(?:各|按)?(?:地区|区域|大区|产品类别|产品|展品|品类|类别|渠道)(?:拆分|分组|展示|对比)?", "", merged_base)
+        merged_base = re.sub(r"(?:各|按)?(?:地区|区域|大区|产品类别|产品|展品|品类|类别|渠道|达人|主播|KOL|KOC|kol|koc|博主|创作者)(?:拆分|分组|展示|对比)?", "", merged_base)
     if any(region in current for region in REGIONS):
         for region in REGIONS:
             merged_base = merged_base.replace(region, "")
@@ -1730,6 +1765,10 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
         yield {"type": "step", "step_id": 5, "title": "深度分析 (Python/Pandas)", "status": "completed", "detail": "完成" if python_analysis and python_analysis["success"] else "未执行"}
         yield {"type": "thinking", "content": "已使用 Python/Pandas 完成深度分析" if (python_analysis and python_analysis["success"]) else "Python 分析未执行，使用 SQL 结果"}
 
+    mapping_notes = field_mapping_notes(query_plan.field_mappings)
+    if mapping_notes:
+        insights = mapping_notes + [item for item in insights if item not in mapping_notes]
+
     chart_sections = _build_data_chart_sections(
         question=effective_question,
         intent_label=intent_result.label,
@@ -1810,6 +1849,7 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
         "sql_repair": sql_repair,
         "python_analysis": python_analysis,
         "python_code": python_code,
+        "field_mappings": query_plan.field_mappings,
         "answer_type": "data_analysis",
         "context_applied": context_applied,
         "effective_question": effective_question,

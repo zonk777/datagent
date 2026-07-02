@@ -8,6 +8,7 @@ import httpx
 
 from ..config import get_settings
 from .security import UnsafeQueryError, validate_readonly_sql
+from .field_aliases import alias_hints_for_question
 
 
 class FieldNotFoundError(Exception):
@@ -204,6 +205,9 @@ def _sql_messages(
         "schema": _schema_payload(dataset, relevant_columns),
         "limit": limit,
     }
+    alias_hints = alias_hints_for_question(question, dataset.get("columns", []))
+    if alias_hints:
+        payload["field_alias_hints"] = alias_hints
     if failed_sql or error:
         payload["repair_task"] = {
             "failed_sql": failed_sql or "",
@@ -253,6 +257,14 @@ def _sql_messages(
     if intent_reason:
         intent_hint = f"当前分析意图: {intent_reason}。请根据此意图选择合理的聚合方式。"
 
+    alias_hint = ""
+    if alias_hints:
+        alias_hint = (
+            "业务字段别名/近似匹配提示（极其重要）：payload.field_alias_hints 已给出用户口语词与 schema 字段的候选映射。"
+            "如果 matched_columns 非空，请优先使用其中最匹配的字段生成 SQL，不要把该业务词判定为 FIELD_NOT_FOUND。"
+            "confidence 不是 high 时也可以先采用候选字段，系统会在最终回答中说明这是近似字段理解，方便用户后续修正。"
+        )
+
     # ── field-not-found rule (always present) ─────────────────────────
     # Build a quick summary of available columns for the error message.
     columns_summary = "、".join(
@@ -261,7 +273,7 @@ def _sql_messages(
     )
     field_not_found_hint = (
         "字段不存在处理（极其重要）："
-        "如果用户问题中提到的指标/字段/列在当前 schema 中不存在，"
+        "如果用户问题中提到的指标/字段/列在当前 schema 中不存在，且 field_alias_hints 中也没有可用 matched_columns，"
         "绝对不要猜测、不要用相似列替代、不要编造 SQL。"
         f"直接输出: FIELD_NOT_FOUND: <用户提到的字段> 不存在于当前数据表。当前表可用列: {columns_summary}。"
     )
@@ -275,7 +287,7 @@ def _sql_messages(
                 f"结果必须 LIMIT {limit} 以内。"
                 f"{column_hint}"
                 f"{field_not_found_hint}"
-                f"{knowledge_hint}{intent_hint}"
+                f"{alias_hint}{knowledge_hint}{intent_hint}"
             ),
         },
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},

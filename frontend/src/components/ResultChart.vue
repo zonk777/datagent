@@ -230,6 +230,10 @@ watch(() => props.result.chart.type, (type) => {
 watch(() => props.modelValue, (type) => {
   if (type) selectedType.value = type
 })
+watch(() => props.result, () => {
+  selectedType.value = (props.modelValue || props.result.chart.type || 'bar') as ChartType
+  nextTick(render)
+}, { deep: true })
 watch(selectedType, (type) => emit('update:modelValue', type))
 watch(option, () => nextTick(render), { deep: true })
 </script>

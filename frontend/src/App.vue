@@ -34,6 +34,24 @@ const authChecked = ref(false)
 const loginForm = ref({ username: '', password: '' })
 const loginLoading = ref(false)
 const sidebarCollapsed = ref(false)
+type ConfirmDialogOptions = {
+  title: string
+  message: string
+  detail?: string
+  confirmText?: string
+  cancelText?: string
+  variant?: 'danger' | 'default'
+}
+const confirmDialog = ref({
+  open: false,
+  title: '',
+  message: '',
+  detail: '',
+  confirmText: '确定',
+  cancelText: '取消',
+  variant: 'danger' as 'danger' | 'default',
+})
+let confirmResolver: ((confirmed: boolean) => void) | null = null
 
 const navItems: Array<{ id: ViewName; label: string; icon: string }> = [
   { id: 'overview', label: '工作台', icon: 'home' },
@@ -46,6 +64,27 @@ const navItems: Array<{ id: ViewName; label: string; icon: string }> = [
 ]
 const pageTitle = computed(() => navItems.find(i => i.id === activeView.value)?.label || 'DataAgent')
 const examples = ['统计各地区销售额', '按月份展示销售额趋势', '查询投诉率最高的区域', '分析华东地区转化率']
+
+function showConfirm(options: ConfirmDialogOptions) {
+  confirmDialog.value = {
+    open: true,
+    title: options.title,
+    message: options.message,
+    detail: options.detail || '',
+    confirmText: options.confirmText || '确定',
+    cancelText: options.cancelText || '取消',
+    variant: options.variant || 'danger',
+  }
+  return new Promise<boolean>((resolve) => {
+    confirmResolver = resolve
+  })
+}
+
+function closeConfirm(confirmed: boolean) {
+  confirmDialog.value.open = false
+  confirmResolver?.(confirmed)
+  confirmResolver = null
+}
 
 function cleanInsightText(text: string) {
   return String(text || '')
@@ -257,7 +296,13 @@ async function openSession(id: string) {
 
 async function deleteSession(id: string) {
   const s = sessions.value.find(i => i.id === id)
-  if (!window.confirm(`确定删除「${s?.title || '该历史对话'}」吗？`)) return
+  const confirmed = await showConfirm({
+    title: '删除历史对话',
+    message: `确定删除「${s?.title || '该历史对话'}」吗？`,
+    detail: '删除后将无法从历史对话中恢复。',
+    confirmText: '确认删除',
+  })
+  if (!confirmed) return
   try { await api.deleteSession(id); sessions.value = sessions.value.filter(i => i.id !== id); if (sessionId.value === id) { sessionId.value = undefined; chatMessages.value = []; result.value = null }; dashboard.value = await api.dashboard() }
   catch (err: any) { error.value = err.message || '删除失败' }
 }
@@ -272,7 +317,13 @@ async function doUpload(file: File, name: string, desc: string) {
 async function deleteDataset(id: number) {
   const item = datasets.value.find(ds => ds.id === id)
   const name = item?.name || '该数据集'
-  if (!window.confirm(`确定删除「${name}」吗？\n\n删除后会同时清理该数据集的物理表、字段元数据、权限记录和关联知识片段。`)) return
+  const confirmed = await showConfirm({
+    title: '删除数据集',
+    message: `确定删除「${name}」吗？`,
+    detail: '删除后会同时清理该数据集的物理表、字段元数据、权限记录和关联知识片段。此操作不可撤销。',
+    confirmText: '确认删除',
+  })
+  if (!confirmed) return
   try {
     await api.deleteDataset(id)
     datasets.value = await api.datasets()
@@ -297,7 +348,13 @@ async function addKnowledge(f: { title: string; content: string; category: strin
 }
 
 async function deleteKnowledge(item: KnowledgeItem) {
-  if (!window.confirm(`确定删除「${item.title}」吗？`)) return
+  const confirmed = await showConfirm({
+    title: '删除知识片段',
+    message: `确定删除「${item.title}」吗？`,
+    detail: '删除后会从业务知识库和向量索引中移除，相关问答将不再引用该片段。',
+    confirmText: '确认删除',
+  })
+  if (!confirmed) return
   try { await api.deleteKnowledge(item.id); knowledge.value = knowledge.value.filter(e => e.id !== item.id); dashboard.value = await api.dashboard(); config.value = await api.config() }
   catch (err: any) { error.value = err.message || '删除知识片段失败' }
 }
@@ -365,4 +422,24 @@ onMounted(bootstrap)
       <SettingsView v-else :config="config" @updated="(c: ConfigStatus) => config = c" />
     </main>
   </div>
+
+  <Teleport to="body">
+    <div v-if="confirmDialog.open" class="app-confirm-backdrop" @click.self="closeConfirm(false)">
+      <section class="app-confirm-dialog" role="dialog" aria-modal="true" :aria-label="confirmDialog.title">
+        <div class="app-confirm-icon" :class="confirmDialog.variant">
+          <AppIcon name="warning" :size="28" />
+        </div>
+        <div class="app-confirm-body">
+          <small>CONFIRM ACTION</small>
+          <h3>{{ confirmDialog.title }}</h3>
+          <p class="app-confirm-message">{{ confirmDialog.message }}</p>
+          <p v-if="confirmDialog.detail" class="app-confirm-detail">{{ confirmDialog.detail }}</p>
+        </div>
+        <div class="app-confirm-actions">
+          <button class="app-confirm-cancel" type="button" @click="closeConfirm(false)">{{ confirmDialog.cancelText }}</button>
+          <button class="app-confirm-submit" type="button" @click="closeConfirm(true)">{{ confirmDialog.confirmText }}</button>
+        </div>
+      </section>
+    </div>
+  </Teleport>
 </template>

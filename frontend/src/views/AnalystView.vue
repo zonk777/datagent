@@ -36,6 +36,7 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const chosenFile = ref<File | null>(null)
 const selectedChartSectionIndex = ref(0)
 const chartSelections = ref<Record<string, ChartType>>({})
+const resultRevision = ref(0)
 
 function chooseFile(e: Event) {
   chosenFile.value = (e.target as HTMLInputElement).files?.[0] || null
@@ -245,6 +246,16 @@ function chartResultForSection(section: ChartSectionRef, index: number): Analysi
   }
 }
 
+function scrollToChartSection(index: number) {
+  selectedChartSectionIndex.value = index
+  requestAnimationFrame(() => {
+    document.getElementById(`chart-section-${index}`)?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    })
+  })
+}
+
 const reportChartOptions = computed(() => {
   if (!props.result) return undefined
   const sections = chartSections.value.map((section, index) => ({
@@ -256,11 +267,12 @@ const reportChartOptions = computed(() => {
   return { sections }
 })
 
-watch(() => props.result?.session_id, () => {
+watch(() => props.result, () => {
+  resultRevision.value += 1
   selectedChartSectionIndex.value = 0
   showSql.value = false
   chartSelections.value = {}
-})
+}, { flush: 'sync' })
 
 watch(() => chartSections.value.length, (length) => {
   if (selectedChartSectionIndex.value >= length) selectedChartSectionIndex.value = 0
@@ -364,22 +376,24 @@ watch(() => chartSections.value.length, (length) => {
           <div v-if="chartSections.length" class="chart-stack">
             <div v-if="chartSections.length > 1" class="chart-section-switch chart-overview-switch">
               <div>
-                <small>CHART SECTIONS</small>
-                <strong>本次生成 {{ chartSections.length }} 组图表</strong>
+                <small>SMART CONTENTS</small>
+                <strong>智能目录 · 本次生成 {{ chartSections.length }} 组图表</strong>
               </div>
               <div class="chart-section-tabs">
                 <button
                   v-for="(section, index) in chartSections"
                   :key="section.id || index"
                   :class="{ active: selectedChartSectionIndex === index }"
+                  :aria-current="selectedChartSectionIndex === index ? 'true' : undefined"
                   type="button"
-                  @click="selectedChartSectionIndex = index"
+                  @click="scrollToChartSection(index)"
                 >
                   {{ section.title || `图表 ${index + 1}` }}
                 </button>
               </div>
             </div>
             <article
+              :id="`chart-section-${sectionIndex}`"
               v-for="(section, sectionIndex) in chartSections"
               :key="section.id || `chart-${sectionIndex}`"
               :class="['chart-card', 'multi-chart-card', { active: selectedChartSectionIndex === sectionIndex }]"
@@ -392,6 +406,7 @@ watch(() => chartSections.value.length, (length) => {
                 </div>
               </div>
               <ResultChart
+                :key="`${resultRevision}-${section.id || sectionIndex}`"
                 :result="chartResultForSection(section, sectionIndex)"
                 :model-value="chartTypeForSection(section, sectionIndex)"
                 @update:model-value="setChartTypeForSection(section, sectionIndex, $event)"
@@ -681,6 +696,7 @@ watch(() => chartSections.value.length, (length) => {
 .multi-chart-card {
   display: grid;
   gap: 14px;
+  scroll-margin-top: 118px;
 }
 
 .multi-chart-card.active {

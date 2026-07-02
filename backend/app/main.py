@@ -14,7 +14,14 @@ from .services.vector_store import VectorStoreError, sync_knowledge
 
 # ---- in-memory rate limiter ----
 _rate_window = 60
-_rate_limits: dict[str, int] = {"auth/login": 5, "agent/chat": 30, "datasets/upload": 10}
+_rate_limits: dict[str, int] = {
+    "auth/login": 5,
+    "agent/chat": 30,
+    "datasets/upload/chunk": 600,
+    "datasets/upload/chunks": 240,
+    "datasets/upload/complete": 60,
+    "datasets/upload": 30,
+}
 _rate_buckets: dict[str, list[float]] = defaultdict(list)
 
 
@@ -62,7 +69,7 @@ def _client_ip(request: Request) -> str:
 async def rate_limit(request: Request, call_next):
     path = request.url.path
     bucket_key = None
-    for pattern, limit in _rate_limits.items():
+    for pattern, limit in sorted(_rate_limits.items(), key=lambda item: len(item[0]), reverse=True):
         if f"/{pattern}" in path or path.endswith(f"/{pattern}"):
             bucket_key = pattern
             break
