@@ -91,6 +91,12 @@ def _report_title(data: ReportData) -> str:
 
 
 ALLOWED_CHART_TYPES = {"bar", "line", "pie", "scatter", "area", "radar", "none"}
+CN_NUMBERS = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
+
+
+def _section_heading(index: int, title: str) -> str:
+    prefix = CN_NUMBERS[index] if index < len(CN_NUMBERS) else str(index)
+    return f"{prefix}、{title}"
 
 
 def apply_chart_options(data: ReportData, raw_options: str | dict[str, Any] | None) -> ReportData:
@@ -253,6 +259,30 @@ def _chart_insights(chart_payload: dict[str, Any], payload: dict[str, Any]) -> l
     return matched[:3]
 
 
+def _overall_insights(payload: dict[str, Any], chart_payloads: list[dict[str, Any]]) -> list[str]:
+    insights = [_safe_text(item).strip() for item in payload.get("insights", []) if _safe_text(item).strip()]
+    if not insights:
+        return []
+    assigned: set[str] = set()
+    for chart_payload in chart_payloads:
+        assigned.update(_chart_insights(chart_payload, payload))
+    basis = _document_basis_line(payload) if _is_document_payload(payload) else ""
+    remaining = [item for item in insights if item not in assigned and item != basis]
+    preferred = [
+        item
+        for item in remaining
+        if any(word in item for word in ("建议", "关注", "风险", "应", "需要", "后续", "优化", "下钻", "复盘", "验证"))
+    ]
+    selected = preferred or remaining
+    if selected:
+        return selected[:6]
+    if _is_document_payload(payload) and chart_payloads:
+        return ["建议结合各图表继续下钻异常指标、增长来源与风险项，并补充业务口径进行交叉验证。"]
+    if chart_payloads:
+        return ["建议围绕上方图表中的高值、低值、趋势拐点和异常波动继续下钻，结合业务规则验证原因。"]
+    return []
+
+
 def _chart_image_uri(chart_payload: dict[str, Any]) -> str:
     image = build_chart_image(chart_payload)
     if not image:
@@ -274,11 +304,13 @@ def build_html_report(data: ReportData) -> str:
         uri = _chart_image_uri(chart_payload)
         if uri:
             chart_insights = "".join(f"<li>{_h(item)}</li>" for item in _chart_insights(chart_payload, payload))
-            insight_block = f"<div class='chart-insights'><h4>该图结论</h4><ul>{chart_insights}</ul></div>" if chart_insights else ""
+            insight_block = f"<div class='chart-insights'><h4>该图提示</h4><ul>{chart_insights}</ul></div>" if chart_insights else ""
             chart_blocks += (
                 f"<section class='chart-block'><h3>{_h(chart_payload.get('title'))}</h3>"
                 f"<img src='{uri}' alt='{_h(chart_payload.get('title'))}' />{insight_block}</section>"
             )
+    overall_items = "".join(f"<li>{_h(item)}</li>" for item in _overall_insights(payload, chart_payloads))
+    overall_block = f"<h2>总体建议</h2><ul>{overall_items}</ul>" if overall_items else ""
     table = ""
     if payload.get("rows"):
         columns = payload.get("columns", [])
@@ -305,7 +337,7 @@ def build_html_report(data: ReportData) -> str:
     <body><main class="report"><h1>{_h(_report_title(data))}</h1>
     <p class="meta">会话编号：{_h(data.session.get("id", ""))} · 类型：{_h(payload.get("intent", ""))} · 生成时间：{_h(data.assistant_message.get("created_at", ""))}</p>
     <p><strong>分析问题：</strong>{_h(data.question)}</p>
-    <h2>回答与发现</h2><ul>{insights}</ul><h2>结果图表</h2>{chart_blocks or '<p>本次报告未生成图表。</p>'}{table}{sql}{refs}</main></body></html>"""
+    <h2>回答与发现</h2><ul>{insights}</ul><h2>结果图表</h2>{chart_blocks or '<p>本次报告未生成图表。</p>'}{overall_block}{table}{sql}{refs}</main></body></html>"""
 
 
 def build_markdown_report(data: ReportData) -> bytes:
@@ -336,12 +368,17 @@ def build_markdown_report(data: ReportData) -> bytes:
                 lines.extend([f"### {title}", "", f"![{title}]({uri})", ""])
                 chart_insights = _chart_insights(chart_payload, payload)
                 if chart_insights:
-                    lines.extend(["**该图结论：**", ""])
+                    lines.extend(["**该图提示：**", ""])
                     for idx, insight in enumerate(chart_insights, 1):
                         lines.append(f"{idx}. {_safe_text(insight)}")
                     lines.append("")
     else:
         lines.append("> 用户选择不生成图像，或当前结果没有可视化数据。")
+    overall = _overall_insights(payload, chart_payloads)
+    if overall:
+        lines.extend(["", "## 总体建议", ""])
+        for idx, insight in enumerate(overall, 1):
+            lines.append(f"{idx}. {_safe_text(insight)}")
     if payload.get("rows"):
         columns = payload.get("columns", [])
         lines.extend(["", "## 查询结果", "", "| " + " | ".join(map(str, columns)) + " |"])
@@ -596,21 +633,31 @@ def build_docx_report(data: ReportData) -> bytes:
                 p.add_run().add_picture(chart_image, width=Inches(6.4))
             chart_insights = _chart_insights(chart_payload, payload)
             if chart_insights:
-                _add_docx_paragraph(doc, "该图结论：", size=10, bold=True)
+                _add_docx_paragraph(doc, "该图提示：", size=10, bold=True)
                 for insight_index, insight in enumerate(chart_insights, 1):
                     _add_docx_paragraph(doc, f"{insight_index}. {insight}", size=9)
 
+    next_section = 4 if chart_payloads else 3
+    overall = _overall_insights(payload, chart_payloads)
+    if overall:
+        doc.add_heading(_section_heading(next_section, "总体建议"), level=1)
+        next_section += 1
+        for idx, insight in enumerate(overall, 1):
+            _add_docx_paragraph(doc, f"{idx}. {insight}", size=10)
+
     if payload.get("rows"):
-        doc.add_heading("四、查询结果", level=1)
+        doc.add_heading(_section_heading(next_section, "查询结果"), level=1)
+        next_section += 1
         columns = payload.get("columns", [])
         _add_docx_table(doc, columns, [[row.get(column, "") for column in columns] for row in payload.get("rows", [])])
 
     if payload.get("sql"):
-        doc.add_heading("五、执行 SQL", level=1)
+        doc.add_heading(_section_heading(next_section, "执行 SQL"), level=1)
+        next_section += 1
         _add_docx_paragraph(doc, payload["sql"], size=9)
 
     if payload.get("knowledge_refs"):
-        doc.add_heading("六、知识依据", level=1)
+        doc.add_heading(_section_heading(next_section, "知识依据"), level=1)
         _add_docx_table(
             doc,
             ["标题", "类别"],
@@ -721,19 +768,29 @@ def build_pdf_report(data: ReportData) -> bytes:
             story.append(PdfImage(tmp.name, width=245 * mm, height=116 * mm))
             chart_insights = _chart_insights(chart_payload, payload)
             if chart_insights:
-                story.append(Paragraph("该图结论：", styles["body"]))
+                story.append(Paragraph("该图提示：", styles["body"]))
                 for insight_index, insight in enumerate(chart_insights, 1):
                     story.append(Paragraph(f"{insight_index}. {html.escape(_safe_text(insight))}", styles["small"]))
             story.append(Spacer(1, 6))
 
+    next_section = 4 if chart_payloads else 3
+    overall = _overall_insights(payload, chart_payloads)
+    if overall:
+        story.extend([Spacer(1, 8), Paragraph(_section_heading(next_section, "总体建议"), styles["h1"])])
+        next_section += 1
+        for idx, insight in enumerate(overall, 1):
+            story.append(Paragraph(f"{idx}. {html.escape(_safe_text(insight))}", styles["body"]))
+
     if payload.get("rows"):
-        story.extend([PageBreak(), Paragraph("四、查询结果", styles["h1"])])
+        story.extend([PageBreak(), Paragraph(_section_heading(next_section, "查询结果"), styles["h1"])])
+        next_section += 1
         columns = payload.get("columns", [])
         story.append(_pdf_table(columns, [[row.get(column, "") for column in columns] for row in payload.get("rows", [])], styles))
     if payload.get("sql"):
-        story.extend([Spacer(1, 8), Paragraph("五、执行 SQL", styles["h1"]), _p(payload["sql"], styles["small"])])
+        story.extend([Spacer(1, 8), Paragraph(_section_heading(next_section, "执行 SQL"), styles["h1"]), _p(payload["sql"], styles["small"])])
+        next_section += 1
     if payload.get("knowledge_refs"):
-        story.extend([Spacer(1, 8), Paragraph("六、知识依据", styles["h1"])])
+        story.extend([Spacer(1, 8), Paragraph(_section_heading(next_section, "知识依据"), styles["h1"])])
         story.append(
             _pdf_table(
                 ["标题", "类别"],

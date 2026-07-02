@@ -172,6 +172,29 @@ function topInsightLines(result: AnalysisResult) {
   return result.insights || []
 }
 
+function assignedChartInsightSet(result: AnalysisResult) {
+  const assigned = new Set<string>()
+  chartSections.value.forEach((section) => {
+    insightsForSection(section, result).forEach((item) => assigned.add(item))
+  })
+  return assigned
+}
+
+function overallInsightLines(result: AnalysisResult) {
+  const insights = (result.insights || [])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+  if (!chartSections.value.length) return insights
+  const assigned = assignedChartInsightSet(result)
+  const remaining = insights.filter((item) => !assigned.has(item) && item !== documentBasisLine(result))
+  const preferred = remaining.filter((item) => /建议|关注|风险|应|需要|后续|优化|下钻|复盘|验证/.test(item))
+  const selected = preferred.length ? preferred : remaining
+  if (selected.length) return selected.slice(0, 6)
+  if (isDocumentResult(result)) return ['建议结合上方各图表继续下钻异常指标、增长来源与风险项，并补充业务口径进行交叉验证。']
+  if (chartSections.value.length) return ['建议围绕上方图表中的高值、低值、趋势拐点和异常波动继续下钻，结合业务规则验证原因。']
+  return []
+}
+
 const chartSections = computed(() => {
   const current = props.result
   if (!current) return []
@@ -205,9 +228,14 @@ const activeChartResult = computed<AnalysisResult | null>(() => {
   const section = activeChartSection.value
   if (!section) return props.result
   const index = Math.min(selectedChartSectionIndex.value, chartSections.value.length - 1)
+  return chartResultForSection(section, index)
+})
+
+function chartResultForSection(section: ChartSectionRef, index: number): AnalysisResult {
+  const current = props.result as AnalysisResult
   const selectedType = chartTypeForSection(section, index)
   return {
-    ...props.result,
+    ...current,
     columns: section.columns,
     rows: section.rows,
     chart: {
@@ -215,7 +243,7 @@ const activeChartResult = computed<AnalysisResult | null>(() => {
       type: selectedType,
     },
   }
-})
+}
 
 const reportChartOptions = computed(() => {
   if (!props.result) return undefined
@@ -326,11 +354,18 @@ watch(() => chartSections.value.length, (length) => {
             </div>
           </div>
           <div class="result-meta"><span>{{ result.intent }}</span><span>{{ result.execution_mode }}</span><span>{{ resultCountLabel(result) }}</span><span v-if="chartSections.length > 1">{{ chartSections.length }} 组图表</span><span v-if="result.context_applied">已使用对话上下文</span></div>
-          <div v-if="activeChartResult && chartSections.length" class="chart-card multi-chart-card">
-            <div v-if="chartSections.length > 1" class="chart-section-switch">
+          <div v-if="topInsightLines(result).length && isDocumentResult(result) && chartSections.length" class="insight-card document-basis-card">
+            <h3><AppIcon name="book" :size="19" />文档依据</h3>
+            <div v-for="(insight, index) in topInsightLines(result)" :key="insight">
+              <span>{{ index + 1 }}</span>
+              <p class="answer-text">{{ insight }}</p>
+            </div>
+          </div>
+          <div v-if="chartSections.length" class="chart-stack">
+            <div v-if="chartSections.length > 1" class="chart-section-switch chart-overview-switch">
               <div>
                 <small>CHART SECTIONS</small>
-                <strong>切换图表内容</strong>
+                <strong>本次生成 {{ chartSections.length }} 组图表</strong>
               </div>
               <div class="chart-section-tabs">
                 <button
@@ -344,21 +379,34 @@ watch(() => chartSections.value.length, (length) => {
                 </button>
               </div>
             </div>
-            <div v-if="activeChartSection?.description" class="chart-section-note">{{ activeChartSection.description }}</div>
-            <ResultChart
-              :result="activeChartResult"
-              :model-value="activeChartSection ? chartTypeForSection(activeChartSection, selectedChartSectionIndex) : activeChartResult.chart.type"
-              @update:model-value="activeChartSection && setChartTypeForSection(activeChartSection, selectedChartSectionIndex, $event)"
-            />
-            <div v-if="activeChartSection && insightsForSection(activeChartSection, result).length" class="chart-linked-insights">
-              <h4><AppIcon name="spark" :size="16" />该图结论</h4>
-              <div v-for="(insight, index) in insightsForSection(activeChartSection, result)" :key="`${activeChartSection.id || selectedChartSectionIndex}-${index}-${insight}`">
-                <span>{{ index + 1 }}</span>
-                <p>{{ insight }}</p>
+            <article
+              v-for="(section, sectionIndex) in chartSections"
+              :key="section.id || `chart-${sectionIndex}`"
+              :class="['chart-card', 'multi-chart-card', { active: selectedChartSectionIndex === sectionIndex }]"
+            >
+              <div class="chart-card-heading">
+                <div>
+                  <small>CHART {{ sectionIndex + 1 }}</small>
+                  <h3>{{ section.title || `图表 ${sectionIndex + 1}` }}</h3>
+                  <p v-if="section.description">{{ section.description }}</p>
+                </div>
               </div>
-            </div>
+              <ResultChart
+                :result="chartResultForSection(section, sectionIndex)"
+                :model-value="chartTypeForSection(section, sectionIndex)"
+                @update:model-value="setChartTypeForSection(section, sectionIndex, $event)"
+              />
+              <div v-if="insightsForSection(section, result).length" class="chart-linked-insights">
+                <h4><AppIcon name="spark" :size="16" />该图提示</h4>
+                <div v-for="(insight, index) in insightsForSection(section, result)" :key="`${section.id || sectionIndex}-${index}-${insight}`">
+                  <span>{{ index + 1 }}</span>
+                  <p>{{ insight }}</p>
+                </div>
+              </div>
+            </article>
           </div>
-          <div v-if="topInsightLines(result).length" class="insight-card"><h3><AppIcon name="spark" :size="19" />{{ isDocumentResult(result) && chartSections.length ? '文档依据' : insightTitle(result) }}</h3><div v-for="(insight, index) in topInsightLines(result)" :key="insight"><span>{{ index + 1 }}</span><p class="answer-text">{{ insight }}</p></div></div>
+          <div v-if="overallInsightLines(result).length" class="insight-card overall-insight-card"><h3><AppIcon name="spark" :size="19" />总体建议</h3><div v-for="(insight, index) in overallInsightLines(result)" :key="`${index}-${insight}`"><span>{{ index + 1 }}</span><p class="answer-text">{{ insight }}</p></div></div>
+          <div v-else-if="topInsightLines(result).length && (!isDocumentResult(result) || !chartSections.length)" class="insight-card"><h3><AppIcon name="spark" :size="19" />{{ insightTitle(result) }}</h3><div v-for="(insight, index) in topInsightLines(result)" :key="insight"><span>{{ index + 1 }}</span><p class="answer-text">{{ insight }}</p></div></div>
           <div v-if="result.knowledge_refs.length" class="knowledge-sources">
             <h3><AppIcon name="book" :size="18"/>知识依据</h3>
             <div class="source-list">
@@ -618,9 +666,57 @@ watch(() => chartSections.value.length, (length) => {
   backdrop-filter: blur(14px);
 }
 
+.chart-stack {
+  display: grid;
+  gap: 18px;
+}
+
+.chart-overview-switch {
+  position: sticky;
+  top: 14px;
+  z-index: 4;
+  box-shadow: 0 16px 34px rgba(38, 78, 110, 0.08);
+}
+
 .multi-chart-card {
   display: grid;
   gap: 14px;
+}
+
+.multi-chart-card.active {
+  border-color: rgba(73, 152, 255, 0.42);
+  box-shadow: 0 22px 52px rgba(32, 108, 186, 0.12);
+}
+
+.chart-card-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 18px;
+  padding: 2px 4px 0;
+}
+
+.chart-card-heading small {
+  display: block;
+  margin-bottom: 4px;
+  color: #62a8bb;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: .18em;
+}
+
+.chart-card-heading h3 {
+  margin: 0;
+  color: #173a55;
+  font-size: 16px;
+  font-weight: 900;
+}
+
+.chart-card-heading p {
+  margin: 5px 0 0;
+  color: #60778a;
+  font-size: 11px;
+  line-height: 1.7;
 }
 
 .chart-section-switch {
