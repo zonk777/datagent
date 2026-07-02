@@ -5,7 +5,7 @@ import ResultChart from '../components/ResultChart.vue'
 import ThinkingBlock from '../components/ThinkingBlock.vue'
 import TypewriterText from '../components/TypewriterText.vue'
 import { api } from '../api'
-import type { AnalysisResult, ChatMessage, SessionSummary, ThinkingStep } from '../types'
+import type { AnalysisResult, ChartType, ChatMessage, SessionSummary, ThinkingStep } from '../types'
 
 const props = defineProps<{
   sessions: SessionSummary[]
@@ -35,6 +35,7 @@ const showSql = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const chosenFile = ref<File | null>(null)
 const selectedChartSectionIndex = ref(0)
+const chartSelections = ref<Record<string, ChartType>>({})
 
 function chooseFile(e: Event) {
   chosenFile.value = (e.target as HTMLInputElement).files?.[0] || null
@@ -85,6 +86,92 @@ function tableTitle(result: AnalysisResult) {
   return isDocumentResult(result) ? '图表数据' : '查询结果'
 }
 
+type KnowledgeRef = AnalysisResult['knowledge_refs'][number]
+
+function compactSourceTitle(title: string) {
+  return String(title || '未命名依据')
+    .replace(/[：:]\s*.*$/, '')
+    .replace(/\.(pdf|docx?|md|txt|xlsx?|csv)$/i, '')
+    .trim() || '未命名依据'
+}
+
+function sourceCategoryLabel(category?: string) {
+  const value = String(category || '').toLowerCase()
+  if (value.includes('upload') || value.includes('file')) return '上传文档'
+  if (value.includes('business')) return '业务规则'
+  if (value.includes('metric')) return '指标口径'
+  if (value.includes('dictionary')) return '数据字典'
+  return category || '知识片段'
+}
+
+function sourceBasisText(item: KnowledgeRef, index: number) {
+  const parts = [`依据 ${index + 1}`, sourceCategoryLabel(item.category)]
+  if (item.retrieval_mode) parts.push(item.retrieval_mode)
+  if (typeof item.score === 'number') parts.push(`相关度 ${item.score.toFixed(3)}`)
+  return parts.join(' · ')
+}
+
+function documentBasisLine(result: AnalysisResult) {
+  const first = result.knowledge_refs?.[0]
+  if (first?.title) return `分析依据：${compactSourceTitle(first.title)}。`
+  return '分析依据：用户上传文档。'
+}
+
+type ChartSectionRef = NonNullable<AnalysisResult['chart_sections']>[number]
+
+function chartSectionKey(section: ChartSectionRef | { id?: string; title?: string }, index: number) {
+  return section.id || `section-${index}`
+}
+
+function chartTypeForSection(section: ChartSectionRef, index: number): ChartType {
+  return chartSelections.value[chartSectionKey(section, index)] || section.chart?.type || 'bar'
+}
+
+function setChartTypeForSection(section: ChartSectionRef, index: number, type: ChartType) {
+  chartSelections.value = {
+    ...chartSelections.value,
+    [chartSectionKey(section, index)]: type,
+  }
+}
+
+function sectionKeywords(section: ChartSectionRef) {
+  const chart = section.chart || {}
+  const fields = [
+    section.title,
+    section.description,
+    chart.title,
+    chart.x_field,
+    chart.y_field,
+    chart.series_name,
+    chart.series_field,
+    ...(chart.series_fields || []),
+    ...section.columns,
+  ]
+  const rowLabels = section.rows
+    .flatMap((row) => section.columns.slice(0, 3).map((column) => row[column]))
+    .map((value) => String(value ?? '').trim())
+  return [...fields, ...rowLabels]
+    .flatMap((value) => String(value || '').split(/[、，,。；;：:\s/()-]+/))
+    .map((value) => value.trim())
+    .filter((value, index, arr) => value.length >= 2 && value.length <= 28 && arr.indexOf(value) === index)
+}
+
+function insightsForSection(section: ChartSectionRef, result: AnalysisResult) {
+  const own = (section.insights || []).map((item) => String(item || '').trim()).filter(Boolean)
+  if (own.length) return own
+  const keywords = sectionKeywords(section)
+  if (!keywords.length) return []
+  return (result.insights || [])
+    .map((item) => String(item || '').trim())
+    .filter((item) => item && keywords.some((keyword) => item.includes(keyword)))
+    .slice(0, 3)
+}
+
+function topInsightLines(result: AnalysisResult) {
+  if (isDocumentResult(result) && chartSections.value.length) return [documentBasisLine(result)]
+  return result.insights || []
+}
+
 const chartSections = computed(() => {
   const current = props.result
   if (!current) return []
@@ -117,17 +204,34 @@ const activeChartResult = computed<AnalysisResult | null>(() => {
   if (!props.result) return null
   const section = activeChartSection.value
   if (!section) return props.result
+  const index = Math.min(selectedChartSectionIndex.value, chartSections.value.length - 1)
+  const selectedType = chartTypeForSection(section, index)
   return {
     ...props.result,
     columns: section.columns,
     rows: section.rows,
-    chart: section.chart,
+    chart: {
+      ...section.chart,
+      type: selectedType,
+    },
   }
+})
+
+const reportChartOptions = computed(() => {
+  if (!props.result) return undefined
+  const sections = chartSections.value.map((section, index) => ({
+    index,
+    id: chartSectionKey(section, index),
+    type: chartTypeForSection(section, index),
+  }))
+  if (!sections.length) return undefined
+  return { sections }
 })
 
 watch(() => props.result?.session_id, () => {
   selectedChartSectionIndex.value = 0
   showSql.value = false
+  chartSelections.value = {}
 })
 
 watch(() => chartSections.value.length, (length) => {
@@ -206,23 +310,23 @@ watch(() => chartSections.value.length, (length) => {
               <h2>{{ result.chart.title }}</h2>
             </div>
             <div class="export-actions" aria-label="导出报告">
-              <a class="export-primary" :href="api.reportUrl(result.session_id, 'html')" target="_blank">
+              <a class="export-primary" :href="api.reportUrl(result.session_id, 'html', reportChartOptions)" target="_blank">
                 <AppIcon name="eye" :size="16" />
                 <span>预览报告</span>
               </a>
-              <a :href="api.reportUrl(result.session_id, 'pdf')" target="_blank" title="导出 PDF">
+              <a :href="api.reportUrl(result.session_id, 'pdf', reportChartOptions)" target="_blank" title="导出 PDF">
                 PDF
               </a>
-              <a :href="api.reportUrl(result.session_id, 'docx')" target="_blank" title="导出 Word">
+              <a :href="api.reportUrl(result.session_id, 'docx', reportChartOptions)" target="_blank" title="导出 Word">
                 Word
               </a>
-              <a :href="api.reportUrl(result.session_id, 'md')" target="_blank" title="导出 Markdown">
+              <a :href="api.reportUrl(result.session_id, 'md', reportChartOptions)" target="_blank" title="导出 Markdown">
                 MD
               </a>
             </div>
           </div>
           <div class="result-meta"><span>{{ result.intent }}</span><span>{{ result.execution_mode }}</span><span>{{ resultCountLabel(result) }}</span><span v-if="chartSections.length > 1">{{ chartSections.length }} 组图表</span><span v-if="result.context_applied">已使用对话上下文</span></div>
-          <div v-if="activeChartResult && activeChartResult.chart.type !== 'none'" class="chart-card multi-chart-card">
+          <div v-if="activeChartResult && chartSections.length" class="chart-card multi-chart-card">
             <div v-if="chartSections.length > 1" class="chart-section-switch">
               <div>
                 <small>CHART SECTIONS</small>
@@ -241,10 +345,32 @@ watch(() => chartSections.value.length, (length) => {
               </div>
             </div>
             <div v-if="activeChartSection?.description" class="chart-section-note">{{ activeChartSection.description }}</div>
-            <ResultChart :result="activeChartResult" />
+            <ResultChart
+              :result="activeChartResult"
+              :model-value="activeChartSection ? chartTypeForSection(activeChartSection, selectedChartSectionIndex) : activeChartResult.chart.type"
+              @update:model-value="activeChartSection && setChartTypeForSection(activeChartSection, selectedChartSectionIndex, $event)"
+            />
+            <div v-if="activeChartSection && insightsForSection(activeChartSection, result).length" class="chart-linked-insights">
+              <h4><AppIcon name="spark" :size="16" />该图结论</h4>
+              <div v-for="(insight, index) in insightsForSection(activeChartSection, result)" :key="`${activeChartSection.id || selectedChartSectionIndex}-${index}-${insight}`">
+                <span>{{ index + 1 }}</span>
+                <p>{{ insight }}</p>
+              </div>
+            </div>
           </div>
-          <div class="insight-card"><h3><AppIcon name="spark" :size="19" />{{ insightTitle(result) }}</h3><div v-for="(insight, index) in result.insights" :key="insight"><span>{{ index + 1 }}</span><p class="answer-text">{{ insight }}</p></div></div>
-          <div v-if="result.knowledge_refs.length" class="knowledge-sources"><h3><AppIcon name="book" :size="18"/>知识依据</h3><article v-for="item in result.knowledge_refs" :key="item.id"><div><strong>{{ item.title }}</strong><em>{{ item.retrieval_mode || item.category }}<template v-if="item.score"> · {{ item.score.toFixed(3) }}</template></em></div><p>{{ item.content }}</p></article></div>
+          <div v-if="topInsightLines(result).length" class="insight-card"><h3><AppIcon name="spark" :size="19" />{{ isDocumentResult(result) && chartSections.length ? '文档依据' : insightTitle(result) }}</h3><div v-for="(insight, index) in topInsightLines(result)" :key="insight"><span>{{ index + 1 }}</span><p class="answer-text">{{ insight }}</p></div></div>
+          <div v-if="result.knowledge_refs.length" class="knowledge-sources">
+            <h3><AppIcon name="book" :size="18"/>知识依据</h3>
+            <div class="source-list">
+              <article v-for="(item, index) in result.knowledge_refs" :key="`${item.id}-${index}`" class="source-item">
+                <span class="source-index">{{ index + 1 }}</span>
+                <div>
+                  <strong>{{ compactSourceTitle(item.title) }}</strong>
+                  <small>{{ sourceBasisText(item, index) }}</small>
+                </div>
+              </article>
+            </div>
+          </div>
           <div v-if="activeChartResult?.rows.length" class="data-table-card"><div class="subhead"><h3>{{ tableTitle(result) }}</h3><button v-if="result.sql" @click="showSql = !showSql">{{ showSql ? '隐藏 SQL' : '查看 SQL' }}</button></div>
             <pre v-if="showSql && result.sql" class="sql-block">{{ result.sql }}</pre>
             <div class="table-scroll"><table><thead><tr><th v-for="column in activeChartResult.columns" :key="column">{{ column }}</th></tr></thead><tbody><tr v-for="(row, index) in activeChartResult.rows" :key="index"><td v-for="column in activeChartResult.columns" :key="column">{{ row[column] }}</td></tr></tbody></table></div>
@@ -342,6 +468,7 @@ watch(() => chartSections.value.length, (length) => {
   border-color: rgba(217, 231, 241, 0.96);
   box-shadow: 0 14px 35px rgba(31, 71, 105, 0.08);
   transition: transform 0.18s ease, box-shadow 0.18s ease;
+  font-family: Inter, Manrope, "HarmonyOS Sans SC", "Microsoft YaHei UI", "Noto Sans SC", sans-serif;
 }
 
 .conversation-message:hover {
@@ -355,6 +482,44 @@ watch(() => chartSections.value.length, (length) => {
 
 .conversation-message.assistant {
   background: rgba(255, 255, 255, 0.92);
+}
+
+.conversation-message small {
+  display: block;
+  margin-bottom: 7px;
+  color: #7e96a9;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .02em;
+}
+
+.conversation-message p,
+.conversation-message :deep(.typewriter-text) {
+  display: block;
+  color: #243b53;
+  font-size: 12px;
+  line-height: 1.78;
+  font-weight: 520;
+  letter-spacing: .01em;
+  white-space: pre-line;
+}
+
+.conversation-message.assistant :deep(.typewriter-text) {
+  color: #21384f;
+}
+
+.conversation-message.user p {
+  color: #2d4962;
+  font-size: 11px;
+}
+
+.conversation-message em {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(225, 235, 242, 0.8);
+  color: #1685b7;
+  font-size: 9px;
+  font-weight: 800;
 }
 
 .result-panel {
@@ -524,6 +689,54 @@ watch(() => chartSections.value.length, (length) => {
   padding: 0 4px;
 }
 
+.chart-linked-insights {
+  display: grid;
+  gap: 9px;
+  margin-top: 4px;
+  padding: 14px;
+  border: 1px solid rgba(216, 231, 241, 0.88);
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(248, 252, 255, 0.96), rgba(238, 251, 249, 0.88));
+}
+
+.chart-linked-insights h4 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 2px;
+  color: #146f82;
+  font-size: 13px;
+}
+
+.chart-linked-insights > div {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding-top: 9px;
+  border-top: 1px solid rgba(225, 236, 243, 0.82);
+}
+
+.chart-linked-insights span {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: #0f8d84;
+  background: linear-gradient(135deg, #e4faf4, #eaf4ff);
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.chart-linked-insights p {
+  margin: 1px 0 0;
+  color: #2d465d;
+  font-size: 11px;
+  line-height: 1.72;
+}
+
 .insight-card > div {
   border-top-color: rgba(226, 236, 243, 0.9);
 }
@@ -531,6 +744,69 @@ watch(() => chartSections.value.length, (length) => {
 .insight-card > div span {
   background: linear-gradient(135deg, #e7fbf5, #eaf4ff);
   box-shadow: inset 0 0 0 1px rgba(28, 174, 154, 0.1);
+}
+
+.knowledge-sources {
+  padding: 20px 22px;
+}
+
+.knowledge-sources h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 13px;
+  color: #166d82;
+  font-size: 14px;
+}
+
+.source-list {
+  display: grid;
+  gap: 10px;
+}
+
+.source-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(218, 232, 241, 0.9);
+  border-radius: 16px;
+  background:
+    linear-gradient(135deg, rgba(247, 252, 255, 0.95), rgba(239, 251, 249, 0.9));
+}
+
+.source-index {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  color: #0f8d84;
+  background: linear-gradient(135deg, #e4faf4, #eaf4ff);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.source-item div {
+  min-width: 0;
+}
+
+.source-item strong {
+  display: block;
+  color: #1a3852;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-item small {
+  display: block;
+  margin-top: 4px;
+  color: #7890a2;
+  font-size: 9px;
+  font-weight: 700;
 }
 
 .empty-result {

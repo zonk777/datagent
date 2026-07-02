@@ -12,6 +12,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   upload: [file: File, name: string, desc: string]
   inspect: [id: number]
+  delete: [id: number]
 }>()
 
 const file = ref<File | null>(null)
@@ -21,6 +22,10 @@ const uploading = ref(false)
 const progress = ref(0)
 const status = ref('')
 const datasetQuery = ref('')
+const canManageDatasets = computed(() => {
+  const role = props.currentAdmin?.role
+  return !!props.currentAdmin?.is_initial_admin || role === 'initial_admin' || role === 'admin' || role === 'data_analyst'
+})
 
 const filteredDatasets = computed(() => {
   const q = datasetQuery.value.trim().toLowerCase()
@@ -52,6 +57,10 @@ function hasDatasetAccess(ds: Dataset) {
 
 function datasetAccessLabel(ds: Dataset) {
   return hasDatasetAccess(ds) ? '有权限' : '无权限'
+}
+
+function canDeleteDataset(ds: Dataset) {
+  return canManageDatasets.value && hasDatasetAccess(ds)
 }
 
 function choose(e: Event) {
@@ -116,26 +125,41 @@ async function doUpload() {
         </div>
 
         <div v-if="filteredDatasets.length" class="dataset-cards">
-          <button
+          <article
             v-for="ds in filteredDatasets"
             :key="ds.id"
             class="dataset-card"
-            :class="{ selected: selectedId === ds.id }"
-            @click="emit('inspect', ds.id)"
           >
-            <span><AppIcon name="database" /></span>
-            <div>
-              <strong>{{ ds.name }}</strong>
-              <small>{{ ds.description || '暂无描述' }}</small>
-              <em>{{ ds.row_count.toLocaleString() }} 行 · {{ ds.column_count }} 字段</em>
-            </div>
-            <div class="dataset-card-tags" aria-label="数据源状态">
-              <i>{{ ds.source_type }}</i>
-              <b :class="hasDatasetAccess(ds) ? 'access-ok' : 'access-denied'">
-                {{ datasetAccessLabel(ds) }}
-              </b>
-            </div>
-          </button>
+            <button
+              class="dataset-card-main"
+              :class="{ selected: selectedId === ds.id }"
+              type="button"
+              @click="emit('inspect', ds.id)"
+            >
+              <span><AppIcon name="database" /></span>
+              <div>
+                <strong>{{ ds.name }}</strong>
+                <small>{{ ds.description || '暂无描述' }}</small>
+                <em>{{ ds.row_count.toLocaleString() }} 行 · {{ ds.column_count }} 字段</em>
+              </div>
+              <div class="dataset-card-tags" aria-label="数据源状态">
+                <i>{{ ds.source_type }}</i>
+                <b :class="hasDatasetAccess(ds) ? 'access-ok' : 'access-denied'">
+                  {{ datasetAccessLabel(ds) }}
+                </b>
+              </div>
+            </button>
+            <button
+              v-if="canDeleteDataset(ds)"
+              class="dataset-delete-btn"
+              type="button"
+              title="删除数据集"
+              aria-label="删除数据集"
+              @click.stop="emit('delete', ds.id)"
+            >
+              ×
+            </button>
+          </article>
         </div>
         <div v-else class="dataset-empty">
           <AppIcon name="search" :size="28" />
@@ -211,6 +235,40 @@ async function doUpload() {
 
 .dataset-card {
   position: relative;
+}
+
+.dataset-card-main {
+  width: 100%;
+  height: 100%;
+  padding-right: 46px !important;
+}
+
+.dataset-delete-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 26px !important;
+  height: 26px;
+  min-width: 26px !important;
+  max-width: 26px !important;
+  display: grid !important;
+  place-items: center;
+  padding: 0 !important;
+  border: 1px solid #ffd8df !important;
+  border-radius: 9px !important;
+  color: #c53c55 !important;
+  background: #fff5f6 !important;
+  font-size: 17px !important;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: none !important;
+  z-index: 2;
+}
+
+.dataset-delete-btn:hover {
+  color: #a91f3d !important;
+  background: #ffe9ed !important;
+  transform: translateY(-1px);
 }
 
 .dataset-card-tags {

@@ -16,6 +16,7 @@ from ..services.error_messages import format_analysis_error
 from ..services.meta_router import route_intent
 from ..services.permissions import ensure_dataset_access, first_accessible_dataset_id
 from ..services.reports import (
+    apply_chart_options,
     build_docx_report,
     build_html_report,
     build_markdown_report,
@@ -327,6 +328,11 @@ def _report_or_404(session_id: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+def _report_with_chart_options(session_id: str, request: Request):
+    data = _report_or_404(session_id)
+    return apply_chart_options(data, request.query_params.get("chart_options"))
+
+
 def _attachment(content: bytes, media_type: str, filename: str) -> Response:
     encoded = quote(filename)
     return Response(
@@ -339,7 +345,7 @@ def _attachment(content: bytes, media_type: str, filename: str) -> Response:
 @router.get("/reports/{session_id}.html", response_class=HTMLResponse)
 def report_html(session_id: str, request: Request) -> str:
     actor = current_admin(request)
-    data = _report_or_404(session_id)
+    data = _report_with_chart_options(session_id, request)
     log_action("export_report", "session", session_id, "HTML", actor=actor)
     return build_html_report(data)
 
@@ -347,7 +353,7 @@ def report_html(session_id: str, request: Request) -> str:
 @router.get("/reports/{session_id}.docx")
 def report_docx(session_id: str, request: Request) -> Response:
     actor = current_admin(request)
-    data = _report_or_404(session_id)
+    data = _report_with_chart_options(session_id, request)
     log_action("export_report", "session", session_id, "Word", actor=actor)
     return _attachment(
         build_docx_report(data),
@@ -359,7 +365,7 @@ def report_docx(session_id: str, request: Request) -> Response:
 @router.get("/reports/{session_id}.pdf")
 def report_pdf(session_id: str, request: Request) -> Response:
     actor = current_admin(request)
-    data = _report_or_404(session_id)
+    data = _report_with_chart_options(session_id, request)
     log_action("export_report", "session", session_id, "PDF", actor=actor)
     return _attachment(
         build_pdf_report(data),
@@ -371,7 +377,7 @@ def report_pdf(session_id: str, request: Request) -> Response:
 @router.get("/reports/{session_id}.md")
 def report_markdown(session_id: str, request: Request) -> Response:
     actor = current_admin(request)
-    data = _report_or_404(session_id)
+    data = _report_with_chart_options(session_id, request)
     log_action("export_report", "session", session_id, "Markdown", actor=actor)
     return _attachment(
         build_markdown_report(data),

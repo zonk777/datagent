@@ -19,6 +19,7 @@ from pymysql.cursors import DictCursor
 from ..config import get_settings
 from ..db import connect, using_mysql
 from .security import safe_identifier
+from .vector_store import VectorStoreError, delete_knowledge_vectors
 
 
 NUMERIC_TYPE_TOKENS = ("int", "float", "double", "decimal", "real", "numeric", "number")
@@ -590,13 +591,29 @@ def update_column_description(dataset_id: int, column_name: str, description: st
 
 
 def delete_dataset(dataset_id: int) -> None:
+    knowledge_ids: list[int] = []
     with connect() as conn:
         row = conn.execute("SELECT table_name FROM datasets WHERE id = ?", (dataset_id,)).fetchone()
         if not row:
             raise ValueError("数据集不存在")
         table_name = row["table_name"]
+        knowledge_ids = [
+            int(item["id"])
+            for item in conn.execute("SELECT id FROM knowledge_chunks WHERE dataset_id = ?", (dataset_id,)).fetchall()
+        ]
         conn.execute(f"DROP TABLE IF EXISTS {_quote_identifier(table_name)}")
+        conn.execute("DELETE FROM knowledge_chunks WHERE dataset_id = ?", (dataset_id,))
+        conn.execute("DELETE FROM dataset_columns WHERE dataset_id = ?", (dataset_id,))
+        conn.execute("DELETE FROM data_lineage WHERE dataset_id = ?", (dataset_id,))
+        conn.execute("DELETE FROM user_dataset_permissions WHERE dataset_id = ?", (dataset_id,))
+        conn.execute("UPDATE sessions SET dataset_id = NULL WHERE dataset_id = ?", (dataset_id,))
         conn.execute("DELETE FROM datasets WHERE id = ?", (dataset_id,))
+    if knowledge_ids:
+        try:
+            delete_knowledge_vectors(knowledge_ids)
+        except VectorStoreError:
+            # 数据集删除不应因为外部向量服务暂时不可用而失败；下次重建索引会自动修正。
+            pass
 
 
 def _quality_level(score: int) -> str:

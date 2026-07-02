@@ -529,5 +529,13 @@ export const api = {
     a.href = url; a.download = '数据分析报告.pdf'; a.click()
     URL.revokeObjectURL(url)
   },
-  reportUrl: (sessionId: string, format: 'html' | 'docx' | 'pdf' | 'md' = 'html') => `${API_BASE}/reports/${sessionId}.${format}`,
+  reportUrl: (
+    sessionId: string,
+    format: 'html' | 'docx' | 'pdf' | 'md' = 'html',
+    chartOptions?: { sections: Array<{ index: number; id?: string; type: string }> },
+  ) => {
+    const base = `${API_BASE}/reports/${sessionId}.${format}`
+    if (!chartOptions?.sections?.length) return base
+    return `${base}?chart_options=${encodeURIComponent(JSON.stringify(chartOptions))}`
+  },
 }

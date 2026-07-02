@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 import html
 import json
 import math
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from io import BytesIO
@@ -88,13 +90,195 @@ def _report_title(data: ReportData) -> str:
     return _safe_text(data.payload.get("chart", {}).get("title") or data.session.get("title") or "数据智能体分析报告")
 
 
+ALLOWED_CHART_TYPES = {"bar", "line", "pie", "scatter", "area", "radar", "none"}
+
+
+def apply_chart_options(data: ReportData, raw_options: str | dict[str, Any] | None) -> ReportData:
+    """Apply per-section chart selections supplied by the frontend export URL."""
+    if not raw_options:
+        return data
+    try:
+        options = json.loads(raw_options) if isinstance(raw_options, str) else raw_options
+    except (TypeError, json.JSONDecodeError):
+        return data
+    if not isinstance(options, dict):
+        return data
+
+    choices = options.get("sections") or []
+    if not isinstance(choices, list):
+        return data
+
+    by_index: dict[int, str] = {}
+    by_id: dict[str, str] = {}
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        chart_type = _safe_text(choice.get("type")).strip()
+        if chart_type not in ALLOWED_CHART_TYPES:
+            continue
+        try:
+            by_index[int(choice.get("index"))] = chart_type
+        except (TypeError, ValueError):
+            pass
+        if choice.get("id"):
+            by_id[_safe_text(choice.get("id"))] = chart_type
+
+    sections = data.payload.get("chart_sections") or []
+    if sections:
+        for index, section in enumerate(sections):
+            if not isinstance(section, dict):
+                continue
+            section_id = _safe_text(section.get("id") or f"section-{index}")
+            chart_type = by_id.get(section_id) or by_index.get(index)
+            if chart_type:
+                section.setdefault("chart", {})["type"] = chart_type
+        first_type = by_id.get("primary") or by_index.get(0)
+        if first_type and data.payload.get("chart"):
+            data.payload["chart"]["type"] = first_type
+    else:
+        chart_type = by_id.get("primary") or by_index.get(0)
+        if chart_type and data.payload.get("chart"):
+            data.payload["chart"]["type"] = chart_type
+    return data
+
+
+def _chart_payloads(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    sections = payload.get("chart_sections") or []
+    output: list[dict[str, Any]] = []
+    if isinstance(sections, list) and sections:
+        for index, section in enumerate(sections, 1):
+            if not isinstance(section, dict):
+                continue
+            chart = dict(section.get("chart") or {})
+            section_title = section.get("title") or chart.get("title") or f"图表 {index}"
+            chart.setdefault("title", section_title)
+            rows = section.get("rows") or []
+            columns = section.get("columns") or []
+            if not rows or not columns or chart.get("type") == "none":
+                continue
+            output.append(
+                {
+                    "title": section_title,
+                    "columns": columns,
+                    "rows": rows,
+                    "chart": chart,
+                    "description": section.get("description") or "",
+                    "insights": section.get("insights") if isinstance(section.get("insights"), list) else [],
+                }
+            )
+    elif payload.get("rows") and (payload.get("chart") or {}).get("type") != "none":
+        output.append(
+            {
+                "title": (payload.get("chart") or {}).get("title") or "结果图表",
+                "columns": payload.get("columns") or [],
+                "rows": payload.get("rows") or [],
+                "chart": dict(payload.get("chart") or {}),
+                "description": "",
+                "insights": [],
+            }
+        )
+    return output
+
+
+def _is_document_payload(payload: dict[str, Any]) -> bool:
+    return _safe_text(payload.get("execution_mode")).startswith(("document", "local-document"))
+
+
+def _compact_reference_title(title: Any) -> str:
+    text = _safe_text(title).strip() or "用户上传文档"
+    for sep in ("：", ":"):
+        if sep in text:
+            text = text.split(sep, 1)[0].strip()
+    for suffix in (".pdf", ".docx", ".doc", ".md", ".txt", ".xlsx", ".csv"):
+        if text.lower().endswith(suffix):
+            text = text[: -len(suffix)].strip()
+            break
+    return text or "用户上传文档"
+
+
+def _document_basis_line(payload: dict[str, Any]) -> str:
+    refs = payload.get("knowledge_refs") or []
+    if refs and isinstance(refs[0], dict):
+        return f"分析依据：{_compact_reference_title(refs[0].get('title'))}。"
+    return "分析依据：用户上传文档。"
+
+
+def _top_report_insights(data: ReportData, chart_payloads: list[dict[str, Any]]) -> list[str]:
+    payload = data.payload
+    if _is_document_payload(payload) and chart_payloads:
+        return [_document_basis_line(payload)]
+    return [_safe_text(item).strip() for item in payload.get("insights", []) if _safe_text(item).strip()]
+
+
+def _chart_keywords(chart_payload: dict[str, Any]) -> list[str]:
+    chart = chart_payload.get("chart") or {}
+    columns = chart_payload.get("columns") or []
+    rows = chart_payload.get("rows") or []
+    values: list[Any] = [
+        chart_payload.get("title"),
+        chart_payload.get("description"),
+        chart.get("title"),
+        chart.get("x_field"),
+        chart.get("y_field"),
+        chart.get("series_name"),
+        chart.get("series_field"),
+        *(chart.get("series_fields") or []),
+        *columns,
+    ]
+    for row in rows[:30]:
+        if isinstance(row, dict):
+            values.extend(row.get(column) for column in columns[:3])
+    keywords: list[str] = []
+    for value in values:
+        text = _safe_text(value).strip()
+        for part in re.split(r"[、，,。；;：:\s/()（）\-]+", text):
+            part = part.strip()
+            if 2 <= len(part) <= 28 and part not in keywords:
+                keywords.append(part)
+    return keywords
+
+
+def _chart_insights(chart_payload: dict[str, Any], payload: dict[str, Any]) -> list[str]:
+    own = [_safe_text(item).strip() for item in chart_payload.get("insights", []) if _safe_text(item).strip()]
+    if own:
+        return own
+    keywords = _chart_keywords(chart_payload)
+    if not keywords:
+        return []
+    matched = [
+        _safe_text(item).strip()
+        for item in payload.get("insights", [])
+        if _safe_text(item).strip() and any(keyword in _safe_text(item) for keyword in keywords)
+    ]
+    return matched[:3]
+
+
+def _chart_image_uri(chart_payload: dict[str, Any]) -> str:
+    image = build_chart_image(chart_payload)
+    if not image:
+        return ""
+    encoded = base64.b64encode(image.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
 def build_html_report(data: ReportData) -> str:
     payload = data.payload
-    insights = "".join(f"<li>{_h(item)}</li>" for item in payload.get("insights", []))
+    chart_payloads = _chart_payloads(payload)
+    insights = "".join(f"<li>{_h(item)}</li>" for item in _top_report_insights(data, chart_payloads))
     references = "".join(
-        f"<li><strong>{_h(item.get('title', ''))}</strong>：{_h(item.get('content', ''))}</li>"
+        f"<li><strong>{_h(_compact_reference_title(item.get('title', '')))}</strong> <span>{_h(item.get('category', '知识依据'))}</span></li>"
         for item in payload.get("knowledge_refs", [])
     )
+    chart_blocks = ""
+    for chart_payload in chart_payloads:
+        uri = _chart_image_uri(chart_payload)
+        if uri:
+            chart_insights = "".join(f"<li>{_h(item)}</li>" for item in _chart_insights(chart_payload, payload))
+            insight_block = f"<div class='chart-insights'><h4>该图结论</h4><ul>{chart_insights}</ul></div>" if chart_insights else ""
+            chart_blocks += (
+                f"<section class='chart-block'><h3>{_h(chart_payload.get('title'))}</h3>"
+                f"<img src='{uri}' alt='{_h(chart_payload.get('title'))}' />{insight_block}</section>"
+            )
     table = ""
     if payload.get("rows"):
         columns = payload.get("columns", [])
@@ -113,16 +297,20 @@ def build_html_report(data: ReportData) -> str:
     h1{{color:#0b3150;margin:0 0 10px;font-size:30px}} h2{{color:#087ea4;margin-top:28px;border-left:4px solid #19b9c6;padding-left:10px}}
     .meta{{color:#667085;background:#f2f8fc;border-radius:14px;padding:10px 14px}} table{{width:100%;border-collapse:collapse;margin:24px 0;background:white}}
     th,td{{padding:10px 12px;border:1px solid #dbe5ee;text-align:left}} th{{background:#edf8fc;color:#31516a}} pre{{background:#102b40;color:#d9f3f1;border-radius:14px;padding:16px;white-space:pre-wrap;overflow:auto}}
-    li{{margin:8px 0}}
+    li{{margin:8px 0}} li span{{color:#718096;font-size:13px;margin-left:8px}}
+    .chart-block{{margin:22px 0;padding:18px;border:1px solid #dbe9f2;border-radius:18px;background:#fbfdff}}
+    .chart-block h3{{margin:0 0 12px;color:#173a55}} .chart-block img{{width:100%;max-width:980px;border-radius:14px;border:1px solid #e3edf5}}
+    .chart-insights{{margin-top:14px;padding:12px 14px;border-radius:14px;background:#f2faf9;border:1px solid #d9eceb}} .chart-insights h4{{margin:0 0 8px;color:#146f82}} .chart-insights ul{{margin:0;padding-left:22px}}
     </style></head>
     <body><main class="report"><h1>{_h(_report_title(data))}</h1>
     <p class="meta">会话编号：{_h(data.session.get("id", ""))} · 类型：{_h(payload.get("intent", ""))} · 生成时间：{_h(data.assistant_message.get("created_at", ""))}</p>
     <p><strong>分析问题：</strong>{_h(data.question)}</p>
-    <h2>回答与发现</h2><ul>{insights}</ul>{table}{sql}{refs}</main></body></html>"""
+    <h2>回答与发现</h2><ul>{insights}</ul><h2>结果图表</h2>{chart_blocks or '<p>本次报告未生成图表。</p>'}{table}{sql}{refs}</main></body></html>"""
 
 
 def build_markdown_report(data: ReportData) -> bytes:
     payload = data.payload
+    chart_payloads = _chart_payloads(payload)
     lines: list[str] = [
         f"# {_report_title(data)}",
         "",
@@ -137,8 +325,23 @@ def build_markdown_report(data: ReportData) -> bytes:
         "## 回答与关键发现",
         "",
     ]
-    for idx, insight in enumerate(payload.get("insights") or [], 1):
+    for idx, insight in enumerate(_top_report_insights(data, chart_payloads), 1):
         lines.append(f"{idx}. {_safe_text(insight)}")
+    lines.extend(["", "## 结果图表", ""])
+    if chart_payloads:
+        for chart_payload in chart_payloads:
+            uri = _chart_image_uri(chart_payload)
+            if uri:
+                title = _safe_text(chart_payload.get("title") or "图表")
+                lines.extend([f"### {title}", "", f"![{title}]({uri})", ""])
+                chart_insights = _chart_insights(chart_payload, payload)
+                if chart_insights:
+                    lines.extend(["**该图结论：**", ""])
+                    for idx, insight in enumerate(chart_insights, 1):
+                        lines.append(f"{idx}. {_safe_text(insight)}")
+                    lines.append("")
+    else:
+        lines.append("> 用户选择不生成图像，或当前结果没有可视化数据。")
     if payload.get("rows"):
         columns = payload.get("columns", [])
         lines.extend(["", "## 查询结果", "", "| " + " | ".join(map(str, columns)) + " |"])
@@ -152,7 +355,7 @@ def build_markdown_report(data: ReportData) -> bytes:
     if payload.get("knowledge_refs"):
         lines.extend(["", "## 知识依据", ""])
         for item in payload["knowledge_refs"]:
-            lines.append(f"- **{_safe_text(item.get('title', ''))}**（{_safe_text(item.get('category', ''))}）：{_safe_text(item.get('content', ''))}")
+            lines.append(f"- **{_compact_reference_title(item.get('title', ''))}**（{_safe_text(item.get('category', ''))}）")
     return "\n".join(lines).encode("utf-8")
 
 
@@ -344,6 +547,7 @@ def _add_docx_table(doc: Document, headers: list[str], rows: list[list[Any]], ma
 
 def build_docx_report(data: ReportData) -> bytes:
     payload = data.payload
+    chart_payloads = _chart_payloads(payload)
     doc = Document()
     section = doc.sections[0]
     section.top_margin = Inches(0.75)
@@ -378,15 +582,23 @@ def build_docx_report(data: ReportData) -> bytes:
     )
 
     doc.add_heading("二、回答与关键发现", level=1)
-    for idx, insight in enumerate(payload.get("insights") or [], 1):
+    for idx, insight in enumerate(_top_report_insights(data, chart_payloads), 1):
         _add_docx_paragraph(doc, f"{idx}. {insight}", size=10)
 
-    chart_image = build_chart_image(payload)
-    if chart_image:
+    if chart_payloads:
         doc.add_heading("三、结果图表", level=1)
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.add_run().add_picture(chart_image, width=Inches(6.4))
+        for index, chart_payload in enumerate(chart_payloads, 1):
+            _add_docx_paragraph(doc, f"{index}. {_safe_text(chart_payload.get('title') or '图表')}", size=10, bold=True)
+            chart_image = build_chart_image(chart_payload)
+            if chart_image:
+                p = doc.add_paragraph()
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                p.add_run().add_picture(chart_image, width=Inches(6.4))
+            chart_insights = _chart_insights(chart_payload, payload)
+            if chart_insights:
+                _add_docx_paragraph(doc, "该图结论：", size=10, bold=True)
+                for insight_index, insight in enumerate(chart_insights, 1):
+                    _add_docx_paragraph(doc, f"{insight_index}. {insight}", size=9)
 
     if payload.get("rows"):
         doc.add_heading("四、查询结果", level=1)
@@ -401,8 +613,8 @@ def build_docx_report(data: ReportData) -> bytes:
         doc.add_heading("六、知识依据", level=1)
         _add_docx_table(
             doc,
-            ["标题", "类别", "内容"],
-            [[item.get("title", ""), item.get("category", ""), item.get("content", "")] for item in payload["knowledge_refs"]],
+            ["标题", "类别"],
+            [[_compact_reference_title(item.get("title", "")), item.get("category", "")] for item in payload["knowledge_refs"]],
             max_rows=20,
         )
 
@@ -469,6 +681,7 @@ def _pdf_table(headers: list[str], rows: list[list[Any]], styles: dict[str, Para
 
 def build_pdf_report(data: ReportData) -> bytes:
     payload = data.payload
+    chart_payloads = _chart_payloads(payload)
     out = BytesIO()
     doc = SimpleDocTemplate(out, pagesize=landscape(A4), leftMargin=14 * mm, rightMargin=14 * mm, topMargin=14 * mm, bottomMargin=14 * mm)
     styles = _pdf_styles()
@@ -490,19 +703,28 @@ def build_pdf_report(data: ReportData) -> bytes:
         Spacer(1, 8),
         Paragraph("二、回答与关键发现", styles["h1"]),
     ]
-    for idx, insight in enumerate(payload.get("insights") or [], 1):
+    for idx, insight in enumerate(_top_report_insights(data, chart_payloads), 1):
         story.append(Paragraph(f"{idx}. {html.escape(_safe_text(insight))}", styles["body"]))
 
-    chart_image = build_chart_image(payload)
-    if chart_image:
+    temp_chart_paths: list[str] = []
+    if chart_payloads:
         story.extend([Spacer(1, 8), Paragraph("三、结果图表", styles["h1"])])
-        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        tmp.write(chart_image.getvalue())
-        tmp.close()
-        story.append(PdfImage(tmp.name, width=245 * mm, height=116 * mm))
-        temp_chart_path = tmp.name
-    else:
-        temp_chart_path = None
+        for index, chart_payload in enumerate(chart_payloads, 1):
+            chart_image = build_chart_image(chart_payload)
+            if not chart_image:
+                continue
+            story.append(Paragraph(f"{index}. {html.escape(_safe_text(chart_payload.get('title') or '图表'))}", styles["body"]))
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            tmp.write(chart_image.getvalue())
+            tmp.close()
+            temp_chart_paths.append(tmp.name)
+            story.append(PdfImage(tmp.name, width=245 * mm, height=116 * mm))
+            chart_insights = _chart_insights(chart_payload, payload)
+            if chart_insights:
+                story.append(Paragraph("该图结论：", styles["body"]))
+                for insight_index, insight in enumerate(chart_insights, 1):
+                    story.append(Paragraph(f"{insight_index}. {html.escape(_safe_text(insight))}", styles["small"]))
+            story.append(Spacer(1, 6))
 
     if payload.get("rows"):
         story.extend([PageBreak(), Paragraph("四、查询结果", styles["h1"])])
@@ -514,8 +736,8 @@ def build_pdf_report(data: ReportData) -> bytes:
         story.extend([Spacer(1, 8), Paragraph("六、知识依据", styles["h1"])])
         story.append(
             _pdf_table(
-                ["标题", "类别", "内容"],
-                [[item.get("title", ""), item.get("category", ""), item.get("content", "")] for item in payload["knowledge_refs"]],
+                ["标题", "类别"],
+                [[_compact_reference_title(item.get("title", "")), item.get("category", "")] for item in payload["knowledge_refs"]],
                 styles,
                 max_rows=20,
             )
@@ -523,7 +745,7 @@ def build_pdf_report(data: ReportData) -> bytes:
     try:
         doc.build(story)
     finally:
-        if temp_chart_path:
+        for temp_chart_path in temp_chart_paths:
             try:
                 os.remove(temp_chart_path)
             except OSError:

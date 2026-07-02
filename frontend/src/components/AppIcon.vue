@@ -17,6 +17,8 @@ defineProps<{ name: string; size?: number }>()
     <template v-else-if="name === 'search'"><circle cx="11" cy="11" r="7"/><path d="m20 20-4.2-4.2"/></template>
     <template v-else-if="name === 'download'"><path d="M12 3v11"/><path d="m7 10 5 5 5-5"/><path d="M5 19h14"/></template>
     <template v-else-if="name === 'eye'"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="3"/></template>
+    <template v-else-if="name === 'collapse'"><path d="M4 5h16M4 19h16M4 12h10"/><path d="m18 8-4 4 4 4"/></template>
+    <template v-else-if="name === 'expand'"><path d="M4 5h16M4 19h16M4 12h10"/><path d="m14 8 4 4-4 4"/></template>
     <template v-else><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 2"/></template>
   </svg>
 </template>

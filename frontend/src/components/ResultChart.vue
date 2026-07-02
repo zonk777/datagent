@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import * as echarts from 'echarts'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { AnalysisResult } from '../types'
+import type { AnalysisResult, ChartType as ResultChartType } from '../types'
 
-type ChartType = 'bar' | 'line' | 'pie' | 'scatter' | 'area' | 'radar'
+type ChartType = ResultChartType
 
-const props = defineProps<{ result: AnalysisResult }>()
+const props = defineProps<{ result: AnalysisResult; modelValue?: ChartType }>()
+const emit = defineEmits<{ 'update:modelValue': [value: ChartType] }>()
 const target = ref<HTMLDivElement | null>(null)
 let chart: echarts.ECharts | null = null
 
@@ -17,9 +18,10 @@ const chartTypeOptions: Array<{ value: ChartType; label: string }> = [
   { value: 'scatter', label: '散点图' },
   { value: 'area', label: '面积图' },
   { value: 'radar', label: '雷达图' },
+  { value: 'none', label: '不生成图像' },
 ]
 
-const selectedType = ref<ChartType>((props.result.chart.type === 'none' ? 'bar' : props.result.chart.type) as ChartType)
+const selectedType = ref<ChartType>((props.modelValue || props.result.chart.type || 'bar') as ChartType)
 
 function chartName(type: string | null | undefined) {
   return chartTypeOptions.find((item) => item.value === type)?.label || '图表'
@@ -77,7 +79,9 @@ const displayModeNote = computed(() => {
 })
 
 const option = computed<echarts.EChartsOption>(() => {
-  if (!props.result.rows.length || props.result.chart.type === 'none') return emptyOption()
+  if (!props.result.rows.length || props.result.chart.type === 'none' || selectedType.value === 'none') {
+    return emptyOption(selectedType.value === 'none' ? '已选择不生成图像' : undefined)
+  }
 
   const { spec, x, y, secondaryY, labels, seriesFields, seriesLabel, seriesNames } = baseFields()
   const chartType = selectedType.value
@@ -220,7 +224,13 @@ function resize() { chart?.resize() }
 
 onMounted(() => { render(); window.addEventListener('resize', resize) })
 onBeforeUnmount(() => { window.removeEventListener('resize', resize); chart?.dispose() })
-watch(() => props.result.chart.type, (type) => { selectedType.value = (type === 'none' ? 'bar' : type) as ChartType })
+watch(() => props.result.chart.type, (type) => {
+  if (props.modelValue === undefined) selectedType.value = (type || 'bar') as ChartType
+})
+watch(() => props.modelValue, (type) => {
+  if (type) selectedType.value = type
+})
+watch(selectedType, (type) => emit('update:modelValue', type))
 watch(option, () => nextTick(render), { deep: true })
 </script>
 

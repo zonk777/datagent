@@ -33,6 +33,7 @@ const admins = ref<AdminUser[]>([])
 const authChecked = ref(false)
 const loginForm = ref({ username: '', password: '' })
 const loginLoading = ref(false)
+const sidebarCollapsed = ref(false)
 
 const navItems: Array<{ id: ViewName; label: string; icon: string }> = [
   { id: 'overview', label: '工作台', icon: 'home' },
@@ -45,6 +46,66 @@ const navItems: Array<{ id: ViewName; label: string; icon: string }> = [
 ]
 const pageTitle = computed(() => navItems.find(i => i.id === activeView.value)?.label || 'DataAgent')
 const examples = ['统计各地区销售额', '按月份展示销售额趋势', '查询投诉率最高的区域', '分析华东地区转化率']
+
+function cleanInsightText(text: string) {
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[-•\d.、\s]+/, '')
+    .trim()
+}
+
+function shortenText(text: string, max = 150) {
+  const cleaned = cleanInsightText(text)
+  if (cleaned.length <= max) return cleaned
+  const cut = cleaned.slice(0, max)
+  const sentenceEnd = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('；'), cut.lastIndexOf(';'))
+  return `${(sentenceEnd > 42 ? cut.slice(0, sentenceEnd + 1) : cut).trim()}…`
+}
+
+function followupSuggestions(data: AnalysisResult) {
+  const sections = data.chart_sections || []
+  if (sections.length > 1) {
+    const first = sections[0]?.title || '核心图表'
+    return [
+      `重点解释「${first}」为什么最关键`,
+      '继续下钻风险点和形成原因',
+      '把多组图表整理成答辩汇报话术',
+    ]
+  }
+  if (data.execution_mode?.includes('document')) {
+    return [
+      '提炼适合答辩的3条核心结论',
+      '继续拆解风险点和应对建议',
+      '按财务、业务、技术三个维度重新总结',
+    ]
+  }
+  if (data.answer_type === 'knowledge_qa') {
+    return [
+      '这个指标的计算口径是什么？',
+      '它对应哪些数据字段？',
+      '给一个业务场景中的使用例子',
+    ]
+  }
+  return [
+    '解释最高和最低项的原因',
+    '继续按地区、产品或渠道下钻',
+    '把本轮分析导出成报告',
+  ]
+}
+
+function assistantReply(data: AnalysisResult) {
+  const insights = (data.insights || []).map(cleanInsightText).filter(Boolean)
+  const primary = insights[0] || data.message || '分析已完成。'
+  const secondary = insights.find((item, index) => index > 0 && !item.startsWith('建议：'))
+  const suggestions = followupSuggestions(data)
+  const lines = [
+    `结论：${shortenText(primary, 170)}`,
+  ]
+  if (secondary) lines.push(`补充判断：${shortenText(secondary, 120)}`)
+  lines.push('', '你可以继续问：', ...suggestions.map((item, index) => `${index + 1}. ${item}`))
+  lines.push('', `右侧已整理完整图表和依据，可点击查看该轮结果。`)
+  return lines.join('\n')
+}
 
 async function loadBase() {
   try {
@@ -118,7 +179,7 @@ function analyze(q: string) {
     onResult(data) {
       result.value = data
       sessionId.value = data.session_id
-      assistantMsg.content = data.insights.join('\n')
+      assistantMsg.content = assistantReply(data)
       assistantMsg.payload = data
       assistantMsg._streamed = true
     },
@@ -170,7 +231,7 @@ async function analyzeFile(file: File, q: string) {
     const data = await api.analyzeFile(file, q, selectedDatasetId.value, sessionId.value)
     result.value = data
     sessionId.value = data.session_id
-    assistantMsg.content = data.insights.join('\n')
+    assistantMsg.content = assistantReply(data)
     assistantMsg.payload = data
     assistantMsg._streamed = true
     sessions.value = await api.sessions()
@@ -206,6 +267,28 @@ async function inspectDataset(id: number) { activeView.value = 'datasets'; selec
 async function doUpload(file: File, name: string, desc: string) {
   try { const created = await api.upload(file, name, desc); datasets.value = await api.datasets(); selectedDatasetId.value = created.id; selectedDataset.value = created; dashboard.value = await api.dashboard() }
   catch (err: any) { error.value = err.message || '上传失败' }
+}
+
+async function deleteDataset(id: number) {
+  const item = datasets.value.find(ds => ds.id === id)
+  const name = item?.name || '该数据集'
+  if (!window.confirm(`确定删除「${name}」吗？\n\n删除后会同时清理该数据集的物理表、字段元数据、权限记录和关联知识片段。`)) return
+  try {
+    await api.deleteDataset(id)
+    datasets.value = await api.datasets()
+    currentAdmin.value = currentAdmin.value
+      ? { ...currentAdmin.value, dataset_permissions: (currentAdmin.value.dataset_permissions || []).filter(item => item !== id) }
+      : currentAdmin.value
+    if (selectedDatasetId.value === id || selectedDataset?.value?.id === id) {
+      selectedDatasetId.value = datasets.value[0]?.id
+      selectedDataset.value = selectedDatasetId.value ? await api.dataset(selectedDatasetId.value) : null
+    }
+    knowledge.value = await api.knowledge()
+    dashboard.value = await api.dashboard()
+    config.value = await api.config()
+  } catch (err: any) {
+    error.value = err.message || '删除数据集失败'
+  }
 }
 
 async function addKnowledge(f: { title: string; content: string; category: string }) {
@@ -251,11 +334,14 @@ onMounted(bootstrap)
     </form>
   </div>
 
-  <div v-else class="app-shell">
+  <div v-else :class="['app-shell', { 'sidebar-collapsed': sidebarCollapsed }]">
     <aside class="sidebar">
-      <div class="brand"><div class="brand-mark"><AppIcon name="chart" :size="24" /></div><div><strong>DataAgent</strong><small>企业数据智能体</small></div></div>
-      <nav><button v-for="item in navItems" :key="item.id" :class="['nav-item', { active: activeView === item.id }]" @click="activeView = item.id"><AppIcon :name="item.icon" /><span>{{ item.label }}</span></button></nav>
-      <div class="sidebar-foot"><div class="status-dot" :class="{ online: !error }" /><div><strong>{{ error ? '服务待连接' : '服务运行正常' }}</strong><small>{{ config?.llm_configured ? config.llm_model : '本地演示模式' }}</small></div></div>
+      <div class="brand"><div class="brand-mark"><AppIcon name="chart" :size="24" /></div><div class="brand-copy"><strong>DataAgent</strong><small>企业数据智能体</small></div></div>
+      <button class="sidebar-toggle" type="button" :title="sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'" :aria-label="sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'" @click="sidebarCollapsed = !sidebarCollapsed">
+        <AppIcon :name="sidebarCollapsed ? 'expand' : 'collapse'" :size="17" />
+      </button>
+      <nav><button v-for="item in navItems" :key="item.id" :title="sidebarCollapsed ? item.label : ''" :class="['nav-item', { active: activeView === item.id }]" @click="activeView = item.id"><AppIcon :name="item.icon" /><span>{{ item.label }}</span></button></nav>
+      <div class="sidebar-foot" :title="error ? '服务待连接' : '服务运行正常'"><div class="status-dot" :class="{ online: !error }" /><div><strong>{{ error ? '服务待连接' : '服务运行正常' }}</strong><small>{{ config?.llm_configured ? config.llm_model : '本地演示模式' }}</small></div></div>
     </aside>
 
     <main class="main-area">
@@ -272,7 +358,7 @@ onMounted(bootstrap)
 
       <OverviewView v-if="activeView === 'overview'" :dashboard="dashboard" :datasets="datasets" @analyze="analyze" @inspect="inspectDataset" @nav="(v: string) => activeView = v as ViewName" />
       <AnalystView v-else-if="activeView === 'analyst'" :sessions="sessions" :chat-messages="chatMessages" :result="result" :loading="loading" :session-id="sessionId" :examples="examples" :thinking-steps="thinkingSteps" :thinking-text="thinkingText" :thinking-collapsed="thinkingCollapsed" @analyze="analyze" @analyze-file="analyzeFile" @open-session="openSession" @delete-session="deleteSession" @new-session="newSession" @show-result="(m: ChatMessage) => { if (m.payload) result = m.payload }" @toggle-thinking="toggleThinking" />
-      <DatasetsView v-else-if="activeView === 'datasets'" :datasets="datasets" :selected="selectedDataset" :selected-id="selectedDatasetId" :current-admin="currentAdmin" @upload="doUpload" @inspect="inspectDataset" />
+      <DatasetsView v-else-if="activeView === 'datasets'" :datasets="datasets" :selected="selectedDataset" :selected-id="selectedDatasetId" :current-admin="currentAdmin" @upload="doUpload" @inspect="inspectDataset" @delete="deleteDataset" />
       <KnowledgeView v-else-if="activeView === 'knowledge'" :items="knowledge" @add="addKnowledge" @del="deleteKnowledge" />
       <AuditView v-else-if="activeView === 'audit'" />
       <AccountsView v-else-if="activeView === 'accounts'" :current="currentAdmin" :admins="admins" :datasets="datasets" @create="addAdmin" @update="updateAdmin" @delete="deleteAdmin" />
