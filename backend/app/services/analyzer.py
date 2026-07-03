@@ -31,6 +31,7 @@ from .field_aliases import field_mapping_notes, find_column_by_alias, resolve_fi
 
 
 REGIONS = ["华东", "华南", "华北", "西南"]
+MAX_CHART_SECTIONS = 6
 
 
 @dataclass
@@ -88,18 +89,51 @@ def _column_profile(columns: list[dict]) -> dict[str, str | None]:
         columns[0]["name"] if columns else None,
     )
     influencer_dimension = find_column_by_alias(columns, "达人", numeric=False) or find_column_by_alias(columns, "达人")
+    customer_dimension = find_column_by_alias(columns, "客户", numeric=False) or _find_column(
+        columns, ("customer", "client", "user", "member", "buyer", "客户", "用户", "会员", "买家"), False
+    )
     return {
         "date": _find_column(columns, ("date", "time", "日期", "时间")),
         "region": _find_column(columns, ("region", "area", "地区", "区域")),
         "product": _find_column(columns, ("product", "category", "产品", "品类", "类别")),
         "channel": _find_column(columns, ("channel", "渠道")),
+        "customer": customer_dimension,
         "influencer": influencer_dimension,
-        "sales": _find_column(columns, ("sales_amount", "revenue", "amount", "销售额", "营收", "成交金额"), True) or first_numeric,
+        "sales": (
+            _find_column(
+                columns,
+                (
+                    "sales_amount",
+                    "item_gmv",
+                    "gmv",
+                    "revenue",
+                    "item_paid_amount",
+                    "paid_amount",
+                    "net_paid",
+                    "销售额",
+                    "营收",
+                    "收入",
+                    "成交金额",
+                    "实付金额",
+                ),
+                True,
+            )
+            or _find_column(columns, ("amount", "金额"), True)
+            or first_numeric
+        ),
         "orders": _find_column(columns, ("order_count", "orders", "订单数", "销量"), True),
-        "profit": _find_column(columns, ("profit", "利润"), True),
+        "profit": _find_column(columns, ("profit", "gross_profit", "net_profit", "利润", "毛利", "净利"), True),
         "complaints": _find_column(columns, ("complaint", "投诉"), True),
         "visits": _find_column(columns, ("visit", "traffic", "访问", "流量"), True),
         "conversions": _find_column(columns, ("conversion", "转化"), True),
+        "refund": find_column_by_alias(columns, "退款", numeric=True),
+        "status": _find_column(columns, ("settlement_status", "item_status", "status", "状态", "结算状态", "订单状态"), False),
+        "receivables": find_column_by_alias(columns, "应收账款", numeric=True),
+        "aging": find_column_by_alias(columns, "账龄"),
+        "cash_flow": find_column_by_alias(columns, "现金流", numeric=True),
+        "assets": find_column_by_alias(columns, "资产", numeric=True),
+        "liabilities": find_column_by_alias(columns, "负债", numeric=True),
+        "rd": find_column_by_alias(columns, "研发投入", numeric=True),
         "first_numeric": first_numeric,
         "first_dimension": first_dimension,
     }
@@ -126,6 +160,16 @@ def _metric(question: str, profile: dict[str, str | None], columns: list[dict]) 
         return (f"SUM({profile['orders']})", "订单数", "单", [])
     if any(term in question for term in ("销售额", "销售", "营收", "收入", "成交金额")) and profile["sales"]:
         return (f"ROUND(SUM({profile['sales']}), 2)", "销售额", "元", [])
+    if any(term in question for term in ("应收账款", "应收", "账款", "回款", "欠款")) and profile.get("receivables"):
+        return (f"ROUND(SUM({profile['receivables']}), 2)", "应收账款", "元", [])
+    if any(term in question for term in ("现金流", "经营现金流", "现金流量")) and profile.get("cash_flow"):
+        return (f"ROUND(SUM({profile['cash_flow']}), 2)", "现金流", "元", [])
+    if any(term in question for term in ("研发", "研发投入", "研发费用")) and profile.get("rd"):
+        return (f"ROUND(SUM({profile['rd']}), 2)", "研发投入", "元", [])
+    if any(term in question for term in ("资产", "总资产")) and profile.get("assets"):
+        return (f"ROUND(SUM({profile['assets']}), 2)", "资产", "元", [])
+    if any(term in question for term in ("负债", "债务")) and profile.get("liabilities"):
+        return (f"ROUND(SUM({profile['liabilities']}), 2)", "负债", "元", [])
     dynamic_metric = resolve_field_references(question, columns, numeric=True, limit=1, min_score=0.72)
     if dynamic_metric:
         match = dynamic_metric[0]
@@ -179,6 +223,8 @@ def _breakdowns(question: str, profile: dict[str, str | None]) -> list[tuple[str
         (("地区", "区域", "大区"), profile["region"], "区域"),
         (("产品", "展品", "品类", "类别"), profile["product"], "产品类别"),
         (("渠道",), profile["channel"], "渠道"),
+        (("客户", "用户", "会员", "买家", "消费者", "大客户", "客户集中度"), profile.get("customer"), "客户"),
+        (("账龄", "逾期", "账期", "应收账款账龄"), profile.get("aging"), "账龄"),
         (("达人", "主播", "kol", "koc", "博主", "网红", "创作者", "influencer", "creator", "talent"), profile["influencer"], "达人"),
     ]
     result: list[tuple[str, str]] = []
@@ -203,16 +249,23 @@ def _build_query(question: str, dataset: dict, limit: int) -> QueryPlan:
 
     breakdowns = _breakdowns(question, profile)
     seen_breakdown_columns = {column for column, _ in breakdowns}
+    seen_breakdown_labels = {label for _, label in breakdowns}
     for match in resolve_field_references(question, dataset["columns"], numeric=False, limit=3, min_score=0.66):
         column = match["column"]
+        label = str(match.get("label") or column)
         if column in seen_breakdown_columns:
+            if not any(item.get("column") == column and item.get("term") == match.get("term") for item in field_mappings):
+                field_mappings.append(match)
+            continue
+        if label in seen_breakdown_labels:
             if not any(item.get("column") == column and item.get("term") == match.get("term") for item in field_mappings):
                 field_mappings.append(match)
             continue
         if column == profile.get("date"):
             continue
-        breakdowns.append((column, str(match.get("label") or column)))
+        breakdowns.append((column, label))
         seen_breakdown_columns.add(column)
+        seen_breakdown_labels.add(label)
         field_mappings.append(match)
     is_monthly = any(word in question for word in ("按月", "每月", "月份", "月度"))
     is_time_series = bool(
@@ -647,6 +700,60 @@ def _run_template_query(dataset: dict, query: str, limit: int) -> tuple[QueryPla
         return None
 
 
+def _run_group_query(
+    dataset: dict,
+    *,
+    dimension_column: str | None,
+    dimension_label: str,
+    metric_column: str | None,
+    metric_label: str,
+    limit: int,
+    descending: bool = True,
+) -> tuple[QueryPlan, list[dict[str, Any]]] | None:
+    if not dimension_column or not metric_column:
+        return None
+    row_limit = max(1, min(int(limit or 20), 200))
+    table_name = dataset["table_name"]
+    order_direction = "DESC" if descending else "ASC"
+    sql = (
+        f'SELECT {dimension_column} AS "{dimension_label}", '
+        f'ROUND(SUM({metric_column}), 2) AS "{metric_label}" '
+        f"FROM {table_name} "
+        f"WHERE {dimension_column} IS NOT NULL AND {dimension_column} != '' "
+        f"GROUP BY {dimension_column} ORDER BY 2 {order_direction} LIMIT {row_limit}"
+    )
+    try:
+        safe_sql = validate_readonly_sql(sql, table_name)
+        with connect() as conn:
+            result = conn.execute(safe_sql).fetchall()
+        rows = [_jsonable_row(dict(row)) for row in result]
+        if not rows:
+            return None
+        plan = QueryPlan(
+            sql=safe_sql,
+            params=[],
+            x_field=dimension_label,
+            y_field=metric_label,
+            series_field=None,
+            series_fields=[],
+            time_description=None,
+        )
+        return plan, rows
+    except Exception:
+        return None
+
+
+def _with_chart_type(chart: dict[str, Any], chart_type: str, reason: str | None = None) -> dict[str, Any]:
+    updated = dict(chart)
+    updated["type"] = chart_type
+    recommendation = dict(updated.get("recommendation") or {})
+    recommendation["type"] = chart_type
+    if reason:
+        recommendation["reason"] = reason
+    updated["recommendation"] = recommendation
+    return updated
+
+
 def _floatable(value: Any) -> bool:
     if isinstance(value, bool) or value is None:
         return False
@@ -678,12 +785,14 @@ def _build_data_chart_sections(
     chart: dict[str, Any],
     query_plan: QueryPlan,
     limit: int,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     if not rows or chart.get("type") == "none":
-        return []
+        return [], []
 
     sections: list[dict[str, Any]] = []
+    omitted: list[str] = []
     seen: set[tuple[str, str, tuple[str, ...], str]] = set()
+    multi_chart_requested = _wants_multi_chart(question)
 
     def add_section(
         section_id: str,
@@ -701,6 +810,10 @@ def _build_data_chart_sections(
         if key in seen:
             return
         seen.add(key)
+        if len(sections) >= MAX_CHART_SECTIONS:
+            if title not in omitted:
+                omitted.append(title)
+            return
         sections.append(
             _chart_section(
                 section_id=section_id,
@@ -712,7 +825,7 @@ def _build_data_chart_sections(
             )
         )
 
-    if query_plan.x_field in rows[0] and query_plan.y_field in rows[0]:
+    if not multi_chart_requested and query_plan.x_field in rows[0] and query_plan.y_field in rows[0]:
         add_section(
             "main",
             chart.get("title") or "核心图表",
@@ -722,11 +835,12 @@ def _build_data_chart_sections(
             query_plan,
         )
 
-    if query_plan.series_fields:
+    if query_plan.series_fields and not multi_chart_requested:
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in rows:
             grouped[_series_label(row, query_plan.series_fields)].append(row)
-        for index, (series_name, group_rows) in enumerate(list(grouped.items())[:6], 1):
+        grouped_items = list(grouped.items())
+        for index, (series_name, group_rows) in enumerate(grouped_items[: MAX_CHART_SECTIONS + 8], 1):
             section_plan = QueryPlan(
                 query_plan.sql,
                 query_plan.params,
@@ -760,27 +874,68 @@ def _build_data_chart_sections(
                 section_plan,
                 discriminator=series_name,
             )
+        if len(grouped_items) > MAX_CHART_SECTIONS + 8:
+            omitted.append(f"其余 {len(grouped_items) - MAX_CHART_SECTIONS - 8} 个细分分组")
 
-    if _wants_multi_chart(question):
+    if multi_chart_requested:
         profile = _column_profile(dataset["columns"])
-        dimension_queries: list[tuple[str, str, str]] = []
-        if profile.get("region"):
-            dimension_queries.append(("region", "区域维度", f"{question} 按地区分析"))
-        if profile.get("product"):
-            dimension_queries.append(("product", "产品维度", f"{question} 按产品类别分析"))
-        if profile.get("channel"):
-            dimension_queries.append(("channel", "渠道维度", f"{question} 按渠道分析"))
-        if profile.get("influencer"):
-            dimension_queries.append(("influencer", "达人维度", f"{question} 按达人分析"))
-        if profile.get("date"):
-            dimension_queries.append(("time", "时间趋势", f"{question} 按月趋势分析"))
+        primary_metric = profile.get("sales") or profile.get("first_numeric")
+        primary_metric_label = "销售额/GMV" if profile.get("sales") else str(primary_metric or "指标值")
 
-        for key, title, derived_question in dimension_queries:
-            if len(sections) >= 7:
-                break
+        def add_group_dimension(
+            key: str,
+            title: str,
+            description: str,
+            dimension_column: str | None,
+            metric_column: str | None,
+            metric_label: str,
+            preferred_chart: str | None = None,
+            row_limit: int | None = None,
+        ) -> None:
+            result = _run_group_query(
+                dataset,
+                dimension_column=dimension_column,
+                dimension_label=title,
+                metric_column=metric_column,
+                metric_label=metric_label,
+                limit=row_limit or limit,
+            )
+            if not result:
+                return
+            section_plan, section_rows = result
+            section_chart = _chart_from_plan(
+                question=f"{question} {title}",
+                intent_label=intent_label,
+                dataset_name=dataset["name"],
+                rows=section_rows,
+                query_plan=section_plan,
+                title_prefix=title,
+            )
+            if preferred_chart:
+                section_chart = _with_chart_type(
+                    section_chart,
+                    preferred_chart,
+                    f"{title}更适合用{preferred_chart}观察结构占比或排序差异。",
+                )
+            add_section(
+                f"dimension-{key}",
+                title,
+                description,
+                section_rows,
+                section_chart,
+                section_plan,
+            )
+
+        def add_template_dimension(
+            key: str,
+            title: str,
+            derived_question: str,
+            description: str,
+            preferred_chart: str | None = None,
+        ) -> None:
             result = _run_template_query(dataset, derived_question, limit)
             if not result:
-                continue
+                return
             section_plan, section_rows = result
             section_chart = _chart_from_plan(
                 question=derived_question,
@@ -790,16 +945,121 @@ def _build_data_chart_sections(
                 query_plan=section_plan,
                 title_prefix=title,
             )
+            if preferred_chart:
+                section_chart = _with_chart_type(
+                    section_chart,
+                    preferred_chart,
+                    f"{title}更适合用{preferred_chart}查看趋势或变化。",
+                )
             add_section(
                 f"dimension-{key}",
                 title,
-                f"围绕{title}拆分后的补充图表。",
+                description,
                 section_rows,
                 section_chart,
                 section_plan,
             )
 
-    return sections if len(sections) > 1 else []
+        # 优先补全更像“经营分析报告”的维度，而不是只按地区/产品机械拆分。
+        if profile.get("date"):
+            add_template_dimension(
+                "time",
+                "时间趋势",
+                f"{question} 按月趋势分析",
+                "用于判断指标随时间的增长、回落或波动。",
+                "line",
+            )
+        if profile.get("customer"):
+            add_group_dimension(
+                "customer-concentration",
+                "客户集中度",
+                "按客户贡献度观察是否存在大客户依赖或收入集中风险。",
+                profile.get("customer"),
+                primary_metric,
+                primary_metric_label,
+                "pie",
+                row_limit=10,
+            )
+        if profile.get("aging") and (profile.get("receivables") or primary_metric):
+            add_group_dimension(
+                "receivable-aging",
+                "应收账款账龄",
+                "按账龄/逾期维度观察回款风险；如果表内没有应收字段，则先使用当前最接近的金额指标近似展示。",
+                profile.get("aging"),
+                profile.get("receivables") or primary_metric,
+                "应收账款" if profile.get("receivables") else primary_metric_label,
+                "bar",
+            )
+        elif any(term in question for term in ("应收账款", "应收", "账龄", "回款", "逾期")) and profile.get("status"):
+            add_group_dimension(
+                "receivable-risk-proxy",
+                "回款风险近似",
+                "数据表未发现明确的应收账款/账龄字段，先用结算状态、订单状态或退款金额等最接近字段做近似风险观察。",
+                profile.get("status"),
+                profile.get("refund") or primary_metric,
+                "退款金额" if profile.get("refund") else primary_metric_label,
+                "bar",
+            )
+        if profile.get("cash_flow") and profile.get("date"):
+            add_template_dimension(
+                "cash-flow",
+                "现金流状况",
+                f"{question} 按月分析现金流",
+                "用于观察现金流入流出或净现金流变化。",
+                "line",
+            )
+        if profile.get("profit") and profile.get("date"):
+            add_template_dimension(
+                "profit",
+                "盈利能力",
+                f"{question} 按月分析利润",
+                "用于观察利润走势与收入规模是否同步。",
+                "area",
+            )
+        if profile.get("product"):
+            add_group_dimension(
+                "product",
+                "产品收入结构",
+                "按产品/品类拆分，观察主要收入来源与结构差异。",
+                profile.get("product"),
+                primary_metric,
+                primary_metric_label,
+                "pie",
+                row_limit=12,
+            )
+        if profile.get("channel"):
+            add_group_dimension(
+                "channel",
+                "渠道结构",
+                "按渠道拆分，观察不同来源的贡献度。",
+                profile.get("channel"),
+                primary_metric,
+                primary_metric_label,
+                "bar",
+            )
+        if profile.get("region"):
+            add_group_dimension(
+                "region",
+                "区域维度",
+                "按地区拆分，观察区域经营差异。",
+                profile.get("region"),
+                primary_metric,
+                primary_metric_label,
+                "bar",
+            )
+        if profile.get("influencer"):
+            add_group_dimension(
+                "influencer",
+                "达人贡献",
+                "按达人/主播/创作者拆分，观察带货贡献与头部依赖。",
+                profile.get("influencer"),
+                primary_metric,
+                primary_metric_label,
+                "bar",
+                row_limit=12,
+            )
+
+    return (sections if len(sections) > 1 else []), omitted
 
 
 def _sql_repair_stats(attempts: list[dict[str, Any]], success: bool) -> dict[str, Any]:
@@ -823,16 +1083,33 @@ async def _execute_sql_with_repair(
     intent_reason: str = "",
 ) -> tuple[str, list[dict[str, Any]], str, dict[str, Any]]:
     settings = get_settings()
-    llm_sql = await generate_llm_sql(
-        question, dataset, limit,
-        business_knowledge=business_knowledge,
-        intent_reason=intent_reason,
-    )
-    plan_source = query_plan_source(question, llm_sql)
     template_sql = query_plan.sql
+    attempts: list[dict[str, Any]] = []
+    field_not_found_fallback: str | None = None
+    try:
+        llm_sql = await generate_llm_sql(
+            question, dataset, limit,
+            business_knowledge=business_knowledge,
+            intent_reason=intent_reason,
+        )
+        plan_source = query_plan_source(question, llm_sql)
+    except FieldNotFoundError as exc:
+        # 不把字段识别失败直接暴露成“分析失败”。先回退到模板 SQL/相近字段，
+        # 再在最终洞察里说明采用了近似口径，方便用户后续修正字段。
+        llm_sql = None
+        plan_source = "template_sql_field_fallback"
+        field_not_found_fallback = exc.message
+        attempts.append(
+            {
+                "attempt": 0,
+                "success": False,
+                "source": "llm_sql",
+                "sql": "",
+                "error": f"字段识别失败，已回退到可用字段：{exc.message}",
+            }
+        )
     candidate_sql = llm_sql or template_sql
     candidate_params: list[Any] = [] if llm_sql else query_plan.params
-    attempts: list[dict[str, Any]] = []
 
     for attempt_no in range(1, 4):
         try:
@@ -859,7 +1136,10 @@ async def _execute_sql_with_repair(
                     "error": None,
                 }
             )
-            return safe_sql, rows, plan_source, _sql_repair_stats(attempts, True)
+            stats = _sql_repair_stats(attempts, True)
+            if field_not_found_fallback:
+                stats["field_not_found_fallback"] = field_not_found_fallback
+            return safe_sql, rows, plan_source, stats
         except Exception as exc:
             error = str(exc)
             attempts.append(
@@ -893,6 +1173,8 @@ async def _execute_sql_with_repair(
             break
 
     repair_stats = _sql_repair_stats(attempts, False)
+    if field_not_found_fallback:
+        repair_stats["field_not_found_fallback"] = field_not_found_fallback
     last_error = attempts[-1]["error"] if attempts else "未知 SQL 执行错误"
     raise ValueError(f"SQL 自动修复失败：{last_error}; repair_stats={json.dumps(repair_stats, ensure_ascii=False)}")
 
@@ -1765,11 +2047,20 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
         yield {"type": "step", "step_id": 5, "title": "深度分析 (Python/Pandas)", "status": "completed", "detail": "完成" if python_analysis and python_analysis["success"] else "未执行"}
         yield {"type": "thinking", "content": "已使用 Python/Pandas 完成深度分析" if (python_analysis and python_analysis["success"]) else "Python 分析未执行，使用 SQL 结果"}
 
+    fallback_message = sql_repair.get("field_not_found_fallback") if isinstance(sql_repair, dict) else None
+    if fallback_message:
+        fallback_note = (
+            "字段口径说明：模型没有在数据表中精确找到用户提到的字段，"
+            f"已先按当前可用字段「{query_plan.x_field} / {query_plan.y_field}」生成近似分析；"
+            "如果口径不符合预期，可以继续指定字段名或补充业务说明。"
+        )
+        insights = [fallback_note] + [item for item in insights if item != fallback_note]
+
     mapping_notes = field_mapping_notes(query_plan.field_mappings)
     if mapping_notes:
         insights = mapping_notes + [item for item in insights if item not in mapping_notes]
 
-    chart_sections = _build_data_chart_sections(
+    chart_sections, omitted_chart_sections = _build_data_chart_sections(
         question=effective_question,
         intent_label=intent_result.label,
         dataset=dataset,
@@ -1778,6 +2069,13 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
         query_plan=query_plan,
         limit=settings.query_row_limit,
     )
+    if omitted_chart_sections:
+        insights.append(
+            "图表数量限制：本次最多展示 "
+            f"{MAX_CHART_SECTIONS} 张图，已省略：{'、'.join(omitted_chart_sections[:8])}"
+            + ("等。" if len(omitted_chart_sections) > 8 else "。")
+            + "你可以继续追问其中某个维度单独展开。"
+        )
 
     # ══════════════════════════════════════════════════════════════════════
     # A-003 / A-005: Anchored Lightweight Reflection
@@ -1842,6 +2140,7 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
         "rows": rows,
         "chart": chart,
         "chart_sections": chart_sections,
+        "omitted_chart_sections": omitted_chart_sections,
         "insights": insights,
         "knowledge_refs": knowledge,
         "execution_mode": execution_mode,

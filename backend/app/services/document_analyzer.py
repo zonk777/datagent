@@ -265,6 +265,25 @@ def _chart_sections_from_llm_result(
     insights: list[str],
 ) -> list[dict[str, Any]]:
     raw_sections = result.get("chart_sections") if isinstance(result.get("chart_sections"), list) else []
+    omitted_from_model = result.get("omitted_chart_sections")
+    omitted_titles: list[str] = []
+    if isinstance(omitted_from_model, list):
+        omitted_titles.extend(str(item).strip() for item in omitted_from_model if str(item).strip())
+    if len(raw_sections) > MAX_DOCUMENT_CHART_SECTIONS:
+        omitted_titles.extend(
+            str(item.get("title") or item.get("id") or f"图表 {index}").strip()
+            for index, item in enumerate(raw_sections[MAX_DOCUMENT_CHART_SECTIONS:], MAX_DOCUMENT_CHART_SECTIONS + 1)
+            if isinstance(item, dict)
+        )
+    if omitted_titles:
+        note = (
+            f"图表数量限制：本次最多展示 {MAX_DOCUMENT_CHART_SECTIONS} 张图，"
+            f"已省略：{'、'.join(omitted_titles[:8])}"
+            + ("等。" if len(omitted_titles) > 8 else "。")
+            + "你可以继续追问其中某个维度单独展开。"
+        )
+        if note not in insights:
+            insights.append(note)
     sections: list[dict[str, Any]] = []
     for index, raw in enumerate(raw_sections[:MAX_DOCUMENT_CHART_SECTIONS], 1):
         if not isinstance(raw, dict):
@@ -572,6 +591,8 @@ async def analyze_uploaded_document(
                 "\"x_field\":\"维度字段\",\"y_field\":\"数值字段\",\"series_field\":null,"
                 "\"series_name\":\"系列名称\",\"rows\":[{\"维度字段\":\"指标名\",\"数值字段\":123.45}]}}。"
                 "尽量生成 3-6 个 section，例如：增长指标、收入结构、客户集中度、现金流、资产负债、研发投入。"
+                "最多只能生成 6 个 section；如果你认为还有其他应该生成但因数量限制未展示的图，"
+                "请额外返回 omitted_chart_sections 字符串数组，只写被省略的图表名称。"
                 "每个 section 只放同一量纲或同一主题的数据；如果单位不同，可以拆成不同 section。"
                 "仍然要保留顶层 chart，用最重要的一组图作为默认展示。"
             ),

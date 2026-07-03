@@ -37,6 +37,7 @@ const chosenFile = ref<File | null>(null)
 const selectedChartSectionIndex = ref(0)
 const chartSelections = ref<Record<string, ChartType>>({})
 const resultRevision = ref(0)
+const historyExpanded = ref(false)
 
 function chooseFile(e: Event) {
   chosenFile.value = (e.target as HTMLInputElement).files?.[0] || null
@@ -284,16 +285,39 @@ watch(() => chartSections.value.length, (length) => {
     <div class="analyst-layout">
       <div class="conversation-panel">
         <div class="analyst-welcome"><span><AppIcon name="spark" :size="25" /></span><div><h2>数据智能顾问</h2><p>支持数据分析、知识问答与连续追问</p></div><button class="new-chat-btn" @click="emit('newSession')">新对话</button></div>
-        <div class="session-history">
-          <div class="session-history-title"><small>历史对话</small><span>{{ sessions.length }} 个会话</span></div>
-          <div class="session-history-list">
-            <div v-for="session in sessions" :key="session.id" :class="['session-history-item', { active: sessionId === session.id }]">
-              <button class="session-open-btn" type="button" @click="emit('openSession', session.id)">
-                <strong>{{ session.title }}</strong><small>{{ session.message_count }} 条消息 · {{ session.updated_at }}</small>
-              </button>
-              <button class="session-delete-btn" type="button" title="删除历史对话" @click="emit('deleteSession', session.id)">×</button>
+        <div :class="['session-history-shell', { expanded: historyExpanded, collapsed: !historyExpanded }]">
+          <button
+            class="history-icon-toggle"
+            type="button"
+            :title="historyExpanded ? '收起历史对话' : '展开历史对话'"
+            :aria-expanded="historyExpanded"
+            @click="historyExpanded = !historyExpanded"
+          >
+            <AppIcon :name="historyExpanded ? 'collapse' : 'expand'" :size="18" />
+          </button>
+          <Transition name="history-slide">
+            <div v-if="historyExpanded" class="session-history">
+              <div class="session-history-title">
+                <div>
+                  <small>历史对话</small>
+                  <strong>最近分析记录</strong>
+                </div>
+                <span>{{ sessions.length }} 个会话</span>
+              </div>
+              <div v-if="sessions.length" class="session-history-list">
+                <div v-for="session in sessions" :key="session.id" :class="['session-history-item', { active: sessionId === session.id }]">
+                  <button class="session-open-btn" type="button" @click="emit('openSession', session.id)">
+                    <strong>{{ session.title }}</strong><small>{{ session.message_count }} 条消息 · {{ session.updated_at }}</small>
+                  </button>
+                  <button class="session-delete-btn" type="button" title="删除历史对话" @click="emit('deleteSession', session.id)">×</button>
+                </div>
+              </div>
+              <div v-else class="session-history-empty">
+                <AppIcon name="spark" :size="18" />
+                <span>暂无历史对话</span>
+              </div>
             </div>
-          </div>
+          </Transition>
         </div>
         <div v-if="chatMessages.length" class="conversation-messages">
           <article v-for="(message, index) in chatMessages" :key="message.id || index" :class="['conversation-message', message.role]" @click="emit('showResult', message)">
@@ -477,6 +501,7 @@ watch(() => chartSections.value.length, (length) => {
 }
 
 .analyst-welcome,
+.session-history-shell,
 .session-history,
 .chat-box,
 .conversation-message,
@@ -504,21 +529,184 @@ watch(() => chartSections.value.length, (length) => {
   box-shadow: 0 10px 22px rgba(24, 132, 219, 0.24);
 }
 
+.session-history-shell {
+  min-height: 48px;
+  display: flex;
+  align-items: flex-start;
+}
+
+.session-history-shell.expanded {
+  display: block;
+}
+
+.history-icon-toggle {
+  width: 46px;
+  height: 46px;
+  border: 1px solid rgba(189, 216, 233, 0.82);
+  border-radius: 16px;
+  display: grid;
+  place-items: center;
+  color: #1f7fb6;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.9), rgba(231, 247, 255, 0.72)),
+    radial-gradient(circle at 30% 20%, rgba(38, 148, 230, 0.2), transparent 42%);
+  box-shadow: 0 14px 30px rgba(43, 96, 132, 0.12), inset 0 1px 0 rgba(255,255,255,.9);
+  cursor: pointer;
+  transition: transform .18s ease, box-shadow .18s ease, color .18s ease, background .18s ease;
+}
+
+.history-icon-toggle:hover {
+  transform: translateY(-1px);
+  color: #0b6bd3;
+  box-shadow: 0 18px 38px rgba(39, 117, 180, 0.18), inset 0 1px 0 rgba(255,255,255,.95);
+}
+
+.session-history-shell.expanded .history-icon-toggle {
+  position: absolute;
+  top: 13px;
+  right: 14px;
+  width: 36px;
+  height: 36px;
+  border-radius: 13px;
+  z-index: 3;
+  color: #5f7f95;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 10px 24px rgba(52, 89, 118, 0.1);
+}
+
 .session-history {
-  background: rgba(255, 255, 255, 0.72);
-  border-color: rgba(211, 228, 240, 0.9);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85), 0 12px 28px rgba(55, 93, 124, 0.06);
+  width: 100%;
+  padding: 14px 58px 12px 14px;
+  border-radius: 22px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.86), rgba(242, 250, 255, 0.78)),
+    radial-gradient(circle at 10% 0, rgba(36, 143, 228, 0.11), transparent 42%);
+  border: 1px solid rgba(199, 222, 237, 0.92);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92), 0 16px 36px rgba(46, 91, 123, 0.08);
+}
+
+.session-history-title {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: #7f93a3;
+}
+
+.session-history-title div {
+  min-width: 0;
+}
+
+.session-history-title small {
+  display: block;
+  color: #66a8bb;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+}
+
+.session-history-title strong {
+  display: block;
+  margin-top: 3px;
+  color: #203b54;
+  font-size: 13px;
+  letter-spacing: .01em;
+}
+
+.session-history-title span {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border-radius: 999px;
+  color: #5f8498;
+  background: rgba(232, 247, 252, 0.92);
+  border: 1px solid rgba(204, 230, 238, 0.9);
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.session-history-list {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 1px 0 7px;
+  scrollbar-color: rgba(95, 132, 152, 0.45) transparent;
 }
 
 .session-history-item {
-  background: rgba(255, 255, 255, 0.86);
+  min-width: 214px;
+  max-width: 260px;
+  min-height: 64px;
+  background: rgba(255, 255, 255, 0.9);
   border-color: rgba(218, 232, 241, 0.95);
-  box-shadow: 0 6px 18px rgba(48, 86, 114, 0.05);
+  box-shadow: 0 8px 22px rgba(48, 86, 114, 0.06);
 }
 
 .session-history-item.active {
-  background: linear-gradient(135deg, rgba(236, 247, 255, 0.96), rgba(234, 253, 250, 0.96));
-  box-shadow: 0 12px 26px rgba(42, 136, 223, 0.14);
+  background:
+    linear-gradient(135deg, rgba(236, 247, 255, 0.98), rgba(234, 253, 250, 0.96));
+  border-color: rgba(96, 166, 235, 0.72);
+  box-shadow: 0 13px 28px rgba(42, 136, 223, 0.15);
+}
+
+.session-history-list .session-open-btn {
+  padding: 11px 12px;
+}
+
+.session-history-list .session-open-btn strong {
+  color: #263f57;
+  font-size: 12px;
+  letter-spacing: .01em;
+}
+
+.session-history-list .session-open-btn small {
+  margin-top: 6px;
+  color: #8ca0af;
+  font-size: 9px;
+}
+
+.session-history-list .session-delete-btn {
+  color: #9aabb8;
+  background: rgba(255,255,255,.42);
+}
+
+.session-history-list .session-delete-btn:hover {
+  color: #d1435b;
+  background: #fff1f2;
+}
+
+.session-history-empty {
+  min-height: 62px;
+  border: 1px dashed rgba(179, 211, 229, 0.9);
+  border-radius: 16px;
+  color: #7e98aa;
+  display: grid;
+  place-items: center;
+  gap: 6px;
+  background: rgba(255,255,255,.48);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.history-slide-enter-active,
+.history-slide-leave-active {
+  transition: opacity .18s ease, transform .18s ease, max-height .18s ease;
+  overflow: hidden;
+}
+
+.history-slide-enter-from,
+.history-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+  max-height: 0;
+}
+
+.history-slide-enter-to,
+.history-slide-leave-from {
+  opacity: 1;
+  transform: translateY(0);
+  max-height: 160px;
 }
 
 .conversation-messages {
