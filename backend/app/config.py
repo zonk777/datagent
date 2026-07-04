@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     secret_key: str = "development-only-change-me"
     database_backend: str = "mysql"
     database_path: str = "storage/data_agent.db"
+    session_files_path: str = "storage/session_files"
     mysql_host: str = "127.0.0.1"
     mysql_port: int = 3306
     mysql_user: str = "dataagent"
@@ -58,6 +59,11 @@ class Settings(BaseSettings):
     @property
     def database_file(self) -> Path:
         path = Path(self.database_path)
+        return path if path.is_absolute() else BACKEND_DIR / path
+
+    @property
+    def session_files_directory(self) -> Path:
+        path = Path(self.session_files_path)
         return path if path.is_absolute() else BACKEND_DIR / path
 
     @property

@@ -1,10 +1,28 @@
 from __future__ import annotations
 
 import json
+import re
 
 import httpx
 
 from ..config import get_settings
+
+
+def _parse_json_object(content: str) -> dict:
+    text = str(content or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text).strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, flags=re.S)
+        if not match:
+            raise
+        parsed = json.loads(match.group(0))
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM output is not a JSON object")
+    return parsed
 
 
 async def answer_from_knowledge(
@@ -153,6 +171,113 @@ async def polish_insights(
     except (httpx.HTTPError, KeyError, ValueError, TypeError, json.JSONDecodeError):
         pass
     return draft
+
+
+async def narrate_database_insights(
+    *,
+    question: str,
+    dataset_name: str,
+    rows: list[dict],
+    draft: list[str],
+    chart_sections: list[dict],
+    knowledge: list[dict],
+    omitted_chart_sections: list[str] | None = None,
+    technical_notes: list[str] | None = None,
+) -> dict:
+    """Turn database query output into advisor-style business explanation.
+
+    This is intentionally separate from SQL generation.  It receives already
+    computed rows/sections and only rewrites the explanation layer, so internal
+    mechanics such as SQL aliases or repaired column names never leak to users.
+    """
+    settings = get_settings()
+    if not settings.llm_configured:
+        return {}
+
+    section_payload = []
+    for section in (chart_sections or [])[:8]:
+        chart = section.get("chart") or {}
+        section_payload.append(
+            {
+                "id": section.get("id"),
+                "title": section.get("title"),
+                "description": section.get("description"),
+                "chart_type": chart.get("type"),
+                "x_field": chart.get("x_field"),
+                "y_field": chart.get("y_field"),
+                "rows": (section.get("rows") or [])[:12],
+                "draft_insights": (section.get("insights") or [])[:4],
+            }
+        )
+
+    payload = {
+        "model": settings.llm_model,
+        "temperature": 0.45,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是企业数据智能顾问。你已经拿到了数据库查询和图表所需的数据，"
+                    "现在只负责把结果解释成自然、有判断、有原因的业务分析。\n"
+                    "硬性要求：\n"
+                    "1. 不要暴露内部实现细节：禁止出现 SQL、字段别名修正、column_、返回列、修复、LLM、query、"
+                    "字段映射、实际列、期望列、template、repair 等工程词。\n"
+                    "2. 不要机械复述“最高/最低/极差比”，必须说明这意味着什么、可能原因是什么、下一步该验证什么。\n"
+                    "3. 每条结论都要有「结论 + 数据支撑 + 业务含义/原因解释」；原因不确定时用“可能”“需要结合业务验证”。\n"
+                    "4. 对每个图表章节生成 1~3 条解释，解释要贴合该图表，不要把所有结论堆到总体建议。\n"
+                    "5. 总体结论给 2~4 条，最后给 2~4 个后续追问建议。\n"
+                    "6. 不能编造输入数据中没有的数值或对象。\n"
+                    "7. 输出严格 JSON："
+                    '{"overall":["..."],"sections":[{"id":"章节id","insights":["..."]}],'
+                    '"followups":["..."]}'
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "question": question,
+                        "dataset_name": dataset_name,
+                        "rows": rows[:30],
+                        "draft": draft[:8],
+                        "chart_sections": section_payload,
+                        "business_knowledge": (knowledge or [])[:5],
+                        "omitted_chart_sections": omitted_chart_sections or [],
+                        "internal_notes_do_not_show": technical_notes or [],
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+    }
+    headers = {"Authorization": f"Bearer {settings.llm_api_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            response = await client.post(
+                f"{settings.llm_base_url.rstrip('/')}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"].strip()
+            parsed = _parse_json_object(content)
+            overall = [str(item).strip() for item in parsed.get("overall", []) if str(item).strip()]
+            followups = [str(item).strip() for item in parsed.get("followups", []) if str(item).strip()]
+            sections = []
+            for item in parsed.get("sections", []):
+                if not isinstance(item, dict):
+                    continue
+                section_id = str(item.get("id") or "").strip()
+                insights = [str(text).strip() for text in item.get("insights", []) if str(text).strip()]
+                if section_id and insights:
+                    sections.append({"id": section_id, "insights": insights[:3]})
+            return {
+                "overall": overall[:4],
+                "sections": sections,
+                "followups": followups[:4],
+            }
+    except (httpx.HTTPError, KeyError, ValueError, TypeError, json.JSONDecodeError):
+        return {}
 
 
 # ---------------------------------------------------------------------------

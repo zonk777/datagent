@@ -16,6 +16,10 @@ dist/
 .tmp/
 backend/storage/uploads/*
 !backend/storage/uploads/.gitkeep
+backend/storage/session_files/*
+!backend/storage/session_files/.gitkeep
 backend/storage/qdrant/
 backend/storage/logs/
+logs/
+runtime-logs/
 review-reports/*

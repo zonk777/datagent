@@ -38,6 +38,60 @@ const selectedChartSectionIndex = ref(0)
 const chartSelections = ref<Record<string, ChartType>>({})
 const resultRevision = ref(0)
 const historyExpanded = ref(false)
+const historySearch = ref('')
+
+const filteredSessions = computed(() => {
+  const keyword = historySearch.value.trim().toLowerCase()
+  if (!keyword) return props.sessions
+  return props.sessions.filter((session) =>
+    [session.title, session.last_message, session.updated_at]
+      .some((value) => String(value || '').toLowerCase().includes(keyword)),
+  )
+})
+
+function sessionDate(value: string) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+function isSameDay(a: Date, b: Date) {
+  return a.getFullYear() === b.getFullYear()
+    && a.getMonth() === b.getMonth()
+    && a.getDate() === b.getDate()
+}
+
+function isTodaySession(value: string) {
+  const date = sessionDate(value)
+  return date ? isSameDay(date, new Date()) : false
+}
+
+function isYesterdaySession(value: string) {
+  const date = sessionDate(value)
+  if (!date) return false
+  const yesterday = new Date()
+  yesterday.setDate(yesterday.getDate() - 1)
+  return isSameDay(date, yesterday)
+}
+
+const todaySessions = computed(() => filteredSessions.value.filter((session) => isTodaySession(session.updated_at)))
+const yesterdaySessions = computed(() => filteredSessions.value.filter((session) => isYesterdaySession(session.updated_at)))
+const earlierSessions = computed(() => filteredSessions.value.filter((session) =>
+  !isTodaySession(session.updated_at) && !isYesterdaySession(session.updated_at),
+))
+
+function formatHistoryTime(value: string) {
+  const date = sessionDate(value)
+  if (!date) return value
+  const hh = String(date.getHours()).padStart(2, '0')
+  const mm = String(date.getMinutes()).padStart(2, '0')
+  if (isTodaySession(value)) return `${hh}:${mm}`
+  if (isYesterdaySession(value)) return `昨天 ${hh}:${mm}`
+  return `${date.getMonth() + 1}/${date.getDate()} ${hh}:${mm}`
+}
+
+function sessionSnippet(session: SessionSummary) {
+  return String(session.last_message || '暂无摘要').replace(/\s+/g, ' ').trim()
+}
 
 function chooseFile(e: Event) {
   chosenFile.value = (e.target as HTMLInputElement).files?.[0] || null
@@ -58,7 +112,11 @@ function submitInput() {
     emit('analyzeFile', file, q)
     return
   }
-  if (question.value) emit('analyze', question.value)
+  const q = question.value.trim()
+  if (q) {
+    question.value = ''
+    emit('analyze', q)
+  }
 }
 
 function isLatestMessage(index: number) {
@@ -158,20 +216,29 @@ function sectionKeywords(section: ChartSectionRef) {
     .filter((value, index, arr) => value.length >= 2 && value.length <= 28 && arr.indexOf(value) === index)
 }
 
+function isTechnicalInsight(item: unknown) {
+  return /字段别名修正|字段理解|SQL|sql|column_\d+|返回列|实际列|期望|修复|repair|template|query_plan|LLM|字段映射/.test(String(item || ''))
+}
+
+function cleanInsightLines(items: unknown[] | undefined) {
+  return (items || [])
+    .map((item) => String(item || '').trim())
+    .filter((item) => item && !isTechnicalInsight(item))
+}
+
 function insightsForSection(section: ChartSectionRef, result: AnalysisResult) {
-  const own = (section.insights || []).map((item) => String(item || '').trim()).filter(Boolean)
+  const own = cleanInsightLines(section.insights || [])
   if (own.length) return own
   const keywords = sectionKeywords(section)
   if (!keywords.length) return []
-  return (result.insights || [])
-    .map((item) => String(item || '').trim())
+  return cleanInsightLines(result.insights || [])
     .filter((item) => item && keywords.some((keyword) => item.includes(keyword)))
     .slice(0, 3)
 }
 
 function topInsightLines(result: AnalysisResult) {
   if (isDocumentResult(result) && chartSections.value.length) return [documentBasisLine(result)]
-  return result.insights || []
+  return cleanInsightLines(result.insights || [])
 }
 
 function assignedChartInsightSet(result: AnalysisResult) {
@@ -183,13 +250,11 @@ function assignedChartInsightSet(result: AnalysisResult) {
 }
 
 function overallInsightLines(result: AnalysisResult) {
-  const insights = (result.insights || [])
-    .map((item) => String(item || '').trim())
-    .filter(Boolean)
+  const insights = cleanInsightLines(result.insights || [])
   if (!chartSections.value.length) return insights
   const assigned = assignedChartInsightSet(result)
   const remaining = insights.filter((item) => !assigned.has(item) && item !== documentBasisLine(result))
-  const preferred = remaining.filter((item) => /建议|关注|风险|应|需要|后续|优化|下钻|复盘|验证/.test(item))
+  const preferred = remaining.filter((item) => /建议|关注|风险|应|需要|后续|优化|下钻|复盘|验证|限制|省略|未生成/.test(item))
   const selected = preferred.length ? preferred : remaining
   if (selected.length) return selected.slice(0, 6)
   if (isDocumentResult(result)) return ['建议结合上方各图表继续下钻异常指标、增长来源与风险项，并补充业务口径进行交叉验证。']
@@ -282,43 +347,82 @@ watch(() => chartSections.value.length, (length) => {
 
 <template>
   <section class="page analyst-page">
-    <div class="analyst-layout">
+    <div :class="['analyst-layout', { 'history-drawer-open': historyExpanded }]">
+      <button
+        v-if="!historyExpanded"
+        class="history-rail-toggle"
+        type="button"
+        title="展开历史记录"
+        aria-label="展开历史记录"
+        @click="historyExpanded = true"
+      >
+        <AppIcon name="history" :size="20" />
+      </button>
+      <Transition name="history-drawer-slide">
+        <aside v-if="historyExpanded" class="history-drawer" aria-label="历史记录">
+          <div class="history-drawer-head">
+            <div>
+              <small>HISTORY</small>
+              <h3>历史记录</h3>
+            </div>
+            <button type="button" title="收起历史记录" aria-label="收起历史记录" @click="historyExpanded = false">
+              <AppIcon name="collapse" :size="17" />
+            </button>
+          </div>
+          <label class="history-search-box">
+            <input v-model="historySearch" placeholder="搜索对话标题或关键词" />
+            <AppIcon name="search" :size="15" />
+          </label>
+          <button class="history-new-chat" type="button" @click="emit('newSession')">
+            <span>+</span>
+            新对话
+          </button>
+          <div class="history-drawer-scroll">
+            <section v-if="todaySessions.length" class="history-group">
+              <small>今天</small>
+              <article v-for="session in todaySessions" :key="session.id" :class="['history-card', { active: sessionId === session.id }]">
+                <button class="history-card-main" type="button" @click="emit('openSession', session.id)">
+                  <strong>{{ session.title }}</strong>
+                  <p>{{ sessionSnippet(session) }}</p>
+                  <span>{{ session.message_count }} 条消息</span>
+                </button>
+                <time>{{ formatHistoryTime(session.updated_at) }}</time>
+                <button class="history-card-delete" type="button" title="删除历史对话" @click.stop="emit('deleteSession', session.id)">×</button>
+              </article>
+            </section>
+            <section v-if="yesterdaySessions.length" class="history-group">
+              <small>昨天</small>
+              <article v-for="session in yesterdaySessions" :key="session.id" :class="['history-card', { active: sessionId === session.id }]">
+                <button class="history-card-main" type="button" @click="emit('openSession', session.id)">
+                  <strong>{{ session.title }}</strong>
+                  <p>{{ sessionSnippet(session) }}</p>
+                  <span>{{ session.message_count }} 条消息</span>
+                </button>
+                <time>{{ formatHistoryTime(session.updated_at) }}</time>
+                <button class="history-card-delete" type="button" title="删除历史对话" @click.stop="emit('deleteSession', session.id)">×</button>
+              </article>
+            </section>
+            <section v-if="earlierSessions.length" class="history-group">
+              <small>更早</small>
+              <article v-for="session in earlierSessions" :key="session.id" :class="['history-card', { active: sessionId === session.id }]">
+                <button class="history-card-main" type="button" @click="emit('openSession', session.id)">
+                  <strong>{{ session.title }}</strong>
+                  <p>{{ sessionSnippet(session) }}</p>
+                  <span>{{ session.message_count }} 条消息</span>
+                </button>
+                <time>{{ formatHistoryTime(session.updated_at) }}</time>
+                <button class="history-card-delete" type="button" title="删除历史对话" @click.stop="emit('deleteSession', session.id)">×</button>
+              </article>
+            </section>
+            <div v-if="!filteredSessions.length" class="history-drawer-empty">
+              <AppIcon name="history" :size="22" />
+              <span>暂无匹配历史</span>
+            </div>
+          </div>
+        </aside>
+      </Transition>
       <div class="conversation-panel">
         <div class="analyst-welcome"><span><AppIcon name="spark" :size="25" /></span><div><h2>数据智能顾问</h2><p>支持数据分析、知识问答与连续追问</p></div><button class="new-chat-btn" @click="emit('newSession')">新对话</button></div>
-        <div :class="['session-history-shell', { expanded: historyExpanded, collapsed: !historyExpanded }]">
-          <button
-            class="history-icon-toggle"
-            type="button"
-            :title="historyExpanded ? '收起历史对话' : '展开历史对话'"
-            :aria-expanded="historyExpanded"
-            @click="historyExpanded = !historyExpanded"
-          >
-            <AppIcon :name="historyExpanded ? 'collapse' : 'expand'" :size="18" />
-          </button>
-          <Transition name="history-slide">
-            <div v-if="historyExpanded" class="session-history">
-              <div class="session-history-title">
-                <div>
-                  <small>历史对话</small>
-                  <strong>最近分析记录</strong>
-                </div>
-                <span>{{ sessions.length }} 个会话</span>
-              </div>
-              <div v-if="sessions.length" class="session-history-list">
-                <div v-for="session in sessions" :key="session.id" :class="['session-history-item', { active: sessionId === session.id }]">
-                  <button class="session-open-btn" type="button" @click="emit('openSession', session.id)">
-                    <strong>{{ session.title }}</strong><small>{{ session.message_count }} 条消息 · {{ session.updated_at }}</small>
-                  </button>
-                  <button class="session-delete-btn" type="button" title="删除历史对话" @click="emit('deleteSession', session.id)">×</button>
-                </div>
-              </div>
-              <div v-else class="session-history-empty">
-                <AppIcon name="spark" :size="18" />
-                <span>暂无历史对话</span>
-              </div>
-            </div>
-          </Transition>
-        </div>
         <div v-if="chatMessages.length" class="conversation-messages">
           <article v-for="(message, index) in chatMessages" :key="message.id || index" :class="['conversation-message', message.role]" @click="emit('showResult', message)">
             <small>{{ message.role === 'user' ? '你' : 'DataAgent' }}</small>
@@ -477,7 +581,273 @@ watch(() => chartSections.value.length, (length) => {
 }
 
 .analyst-layout {
+  position: relative;
   backdrop-filter: blur(18px);
+}
+
+.analyst-layout.history-drawer-open {
+  grid-template-columns: minmax(290px, 320px) minmax(340px, 32%) 1fr;
+}
+
+.analyst-layout:not(.history-drawer-open) .conversation-panel {
+  padding-left: 86px;
+}
+
+.history-rail-toggle {
+  position: absolute;
+  top: 32px;
+  left: 24px;
+  z-index: 12;
+  width: 48px;
+  height: 48px;
+  border: 1px solid rgba(160, 196, 220, 0.56);
+  border-radius: 16px;
+  color: #1f7fb6;
+  background:
+    linear-gradient(145deg, rgba(255,255,255,.9), rgba(230,246,255,.76)),
+    radial-gradient(circle at 35% 25%, rgba(31, 137, 232, .2), transparent 48%);
+  box-shadow: 0 16px 35px rgba(32, 83, 118, 0.13), inset 0 1px 0 rgba(255,255,255,.95);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: transform .18s ease, box-shadow .18s ease, color .18s ease;
+}
+
+.history-rail-toggle:hover {
+  transform: translateY(-1px);
+  color: #0b6bd3;
+  box-shadow: 0 20px 42px rgba(32, 104, 164, 0.18), inset 0 1px 0 rgba(255,255,255,.98);
+}
+
+.history-drawer {
+  height: 100%;
+  min-height: 0;
+  padding: 22px 18px;
+  border-right: 1px solid rgba(205, 224, 237, .9);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.94), rgba(246,251,255,.9)),
+    radial-gradient(circle at 0 0, rgba(39, 137, 230, .1), transparent 40%);
+  box-shadow: 18px 0 42px rgba(39, 80, 112, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: hidden;
+  z-index: 7;
+}
+
+.history-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.history-drawer-head small {
+  display: block;
+  color: #5aa4bd;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: .18em;
+}
+
+.history-drawer-head h3 {
+  margin: 6px 0 0;
+  color: #17334e;
+  font-size: 18px;
+  letter-spacing: -.02em;
+}
+
+.history-drawer-head button {
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(205, 224, 237, .92);
+  border-radius: 11px;
+  color: #6b8295;
+  background: rgba(255,255,255,.8);
+  display: grid;
+  place-items: center;
+}
+
+.history-search-box {
+  height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid rgba(207, 224, 236, .95);
+  border-radius: 10px;
+  background: rgba(255,255,255,.9);
+  color: #668196;
+}
+
+.history-search-box input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  color: #29465d;
+  background: transparent;
+  font-size: 11px;
+}
+
+.history-new-chat {
+  height: 42px;
+  border: 0;
+  border-radius: 10px;
+  color: #fff;
+  background: linear-gradient(100deg, #1677ff, #1bb8c8);
+  box-shadow: 0 14px 28px rgba(26, 123, 226, .22);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-weight: 800;
+  font-size: 12px;
+}
+
+.history-new-chat span {
+  font-size: 18px;
+  line-height: 1;
+  transform: translateY(-1px);
+}
+
+.history-drawer-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding-right: 3px;
+}
+
+.history-group {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.history-group > small {
+  color: #7f94a5;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.history-card {
+  position: relative;
+  min-height: 82px;
+  padding: 12px 44px 12px 13px;
+  border: 1px solid rgba(218, 232, 241, .96);
+  border-radius: 12px;
+  background: rgba(255,255,255,.92);
+  box-shadow: 0 8px 20px rgba(43, 78, 105, .055);
+  transition: border-color .18s ease, box-shadow .18s ease, background .18s ease, transform .18s ease;
+}
+
+.history-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 28px rgba(43, 78, 105, .1);
+}
+
+.history-card.active {
+  border-color: rgba(56, 142, 236, .82);
+  background: linear-gradient(135deg, rgba(238,247,255,.98), rgba(240,253,251,.95));
+  box-shadow: 0 16px 34px rgba(42, 136, 223, .16);
+}
+
+.history-card-main {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+  color: inherit;
+}
+
+.history-card-main strong {
+  display: block;
+  color: #263f57;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-card-main p {
+  margin: 8px 0 6px;
+  color: #668096;
+  font-size: 10px;
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.history-card-main span {
+  color: #8da1af;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.history-card time {
+  position: absolute;
+  top: 13px;
+  right: 13px;
+  color: #7890a2;
+  font-size: 9px;
+}
+
+.history-card-delete {
+  position: absolute;
+  right: 9px;
+  bottom: 9px;
+  z-index: 3;
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(242, 205, 213, .9);
+  border-radius: 9px;
+  color: #c95368;
+  background: rgba(255, 246, 248, .92);
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.history-card-delete:hover {
+  color: #fff;
+  background: #e0526b;
+}
+
+.history-drawer-empty {
+  margin-top: 36px;
+  min-height: 130px;
+  border: 1px dashed rgba(179, 211, 229, .9);
+  border-radius: 16px;
+  color: #7e98aa;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  background: rgba(255,255,255,.5);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.history-drawer-slide-enter-active,
+.history-drawer-slide-leave-active {
+  transition: opacity .22s ease, transform .22s ease;
+}
+
+.history-drawer-slide-enter-from,
+.history-drawer-slide-leave-to {
+  opacity: 0;
+  transform: translateX(-24px);
+}
+
+.history-drawer-slide-enter-to,
+.history-drawer-slide-leave-from {
+  opacity: 1;
+  transform: translateX(0);
 }
 
 .conversation-panel {
@@ -530,13 +900,15 @@ watch(() => chartSections.value.length, (length) => {
 }
 
 .session-history-shell {
+  position: relative;
   min-height: 48px;
   display: flex;
   align-items: flex-start;
+  z-index: 8;
 }
 
 .session-history-shell.expanded {
-  display: block;
+  display: flex;
 }
 
 .history-icon-toggle {
@@ -562,27 +934,26 @@ watch(() => chartSections.value.length, (length) => {
 }
 
 .session-history-shell.expanded .history-icon-toggle {
-  position: absolute;
-  top: 13px;
-  right: 14px;
-  width: 36px;
-  height: 36px;
-  border-radius: 13px;
-  z-index: 3;
-  color: #5f7f95;
-  background: rgba(255, 255, 255, 0.82);
-  box-shadow: 0 10px 24px rgba(52, 89, 118, 0.1);
+  color: #fff;
+  background: linear-gradient(135deg, #177cff, #19b9c6);
+  border-color: rgba(255, 255, 255, 0.36);
+  box-shadow: 0 16px 32px rgba(25, 132, 218, 0.24);
 }
 
 .session-history {
-  width: 100%;
-  padding: 14px 58px 12px 14px;
+  position: absolute;
+  top: 0;
+  left: 58px;
+  width: min(650px, calc(100% - 58px));
+  padding: 14px;
   border-radius: 22px;
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.86), rgba(242, 250, 255, 0.78)),
     radial-gradient(circle at 10% 0, rgba(36, 143, 228, 0.11), transparent 42%);
   border: 1px solid rgba(199, 222, 237, 0.92);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92), 0 16px 36px rgba(46, 91, 123, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92), 0 20px 45px rgba(38, 80, 112, 0.14);
+  backdrop-filter: blur(16px);
+  z-index: 2;
 }
 
 .session-history-title {
@@ -691,22 +1062,22 @@ watch(() => chartSections.value.length, (length) => {
 
 .history-slide-enter-active,
 .history-slide-leave-active {
-  transition: opacity .18s ease, transform .18s ease, max-height .18s ease;
-  overflow: hidden;
+  transition: opacity .2s ease, transform .2s ease, filter .2s ease;
+  pointer-events: none;
 }
 
 .history-slide-enter-from,
 .history-slide-leave-to {
   opacity: 0;
-  transform: translateY(-6px);
-  max-height: 0;
+  transform: translateX(-14px) scale(.98);
+  filter: blur(2px);
 }
 
 .history-slide-enter-to,
 .history-slide-leave-from {
   opacity: 1;
-  transform: translateY(0);
-  max-height: 160px;
+  transform: translateX(0) scale(1);
+  filter: blur(0);
 }
 
 .conversation-messages {

@@ -48,6 +48,9 @@ class IntentResult:
 FEW_SHOT_EXAMPLES: list[dict[str, str]] = [
     {"question": "查询各地区销售额", "label": "data_query"},
     {"question": "统计本月各渠道订单数", "label": "data_query"},
+    {"question": "目前数据库是关于什么的", "label": "data_query"},
+    {"question": "当前数据源是什么内容", "label": "data_query"},
+    {"question": "介绍一下这张表有哪些字段", "label": "data_query"},
     {"question": "分析近30天销售额走势", "label": "trend_analysis"},
     {"question": "按月份看利润趋势", "label": "trend_analysis"},
     {"question": "为什么华东销售额突然下降", "label": "anomaly_attribution"},
@@ -63,6 +66,51 @@ def _clip_confidence(value: float) -> float:
     return round(max(0.0, min(1.0, float(value))), 4)
 
 
+def _is_dataset_meta_question(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text.lower())
+    data_object_terms = (
+        "数据库",
+        "数据源",
+        "数据集",
+        "数据表",
+        "业务库",
+        "当前库",
+        "当前表",
+        "当前数据",
+        "这个库",
+        "这个表",
+        "这张表",
+        "表结构",
+        "字段",
+        "schema",
+        "database",
+        "dataset",
+        "table",
+    )
+    meta_question_terms = (
+        "关于什么",
+        "是什么内容",
+        "什么内容",
+        "有什么内容",
+        "有哪些内容",
+        "有哪些字段",
+        "字段含义",
+        "字段说明",
+        "表结构",
+        "数据概览",
+        "整体概览",
+        "介绍一下",
+        "描述一下",
+        "概览一下",
+        "profile",
+        "overview",
+        "describe",
+    )
+    return any(term.lower() in compact for term in data_object_terms) and any(
+        term.lower() in compact for term in meta_question_terms
+    )
+
+
 def classify_intent_rules(question: str, history: list[dict[str, Any]] | None = None) -> IntentResult:
     text = question.strip()
     compact = re.sub(r"\s+", "", text.lower())
@@ -76,6 +124,9 @@ def classify_intent_rules(question: str, history: list[dict[str, Any]] | None = 
 
     if any(term.lower() in compact for term in report_terms):
         return IntentResult("report_generation", 0.95, "rules", "命中报告/导出类词汇")
+
+    if _is_dataset_meta_question(text):
+        return IntentResult("data_query", 0.96, "rules", "用户询问当前数据库/数据源/数据表概览")
 
     if any(term in text for term in anomaly_terms):
         return IntentResult("anomaly_attribution", 0.92, "rules", "命中异常、原因或归因词汇")
@@ -123,6 +174,8 @@ def _parse_llm_intent(content: str) -> IntentResult:
 async def classify_intent(question: str, history: list[dict[str, Any]] | None = None) -> IntentResult:
     settings = get_settings()
     fallback = classify_intent_rules(question, history)
+    if _is_dataset_meta_question(question):
+        return fallback
     if not settings.llm_configured:
         return fallback
 
@@ -138,6 +191,7 @@ async def classify_intent(question: str, history: list[dict[str, Any]] | None = 
             "content": (
                 "你是企业数据智能体的意图分类器。只能从以下 5 类中选择一个："
                 "data_query, trend_analysis, anomaly_attribution, knowledge_qa, report_generation。"
+                "重要规则：用户询问当前数据库、当前数据源、数据集、数据表是关于什么、是什么内容、有哪些字段、表结构或数据概览时，必须归类为 data_query，不能归类为 knowledge_qa。"
                 "返回严格 JSON：{\"label\":\"...\",\"confidence\":0.0-1.0,\"reason\":\"...\"}。"
                 "temperature=0，优先判断用户当前请求本身；必要时参考历史上下文。"
             ),

@@ -71,6 +71,34 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS session_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    filename TEXT NOT NULL,
+    file_type TEXT NOT NULL DEFAULT '',
+    file_size INTEGER NOT NULL DEFAULT 0,
+    sha256 TEXT NOT NULL,
+    storage_path TEXT NOT NULL DEFAULT '',
+    extracted_text TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(session_id, sha256)
+);
+
+CREATE TABLE IF NOT EXISTS session_document_chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL REFERENCES session_documents(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(document_id, chunk_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_documents_session_id ON session_documents(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_document_chunks_session_id ON session_document_chunks(session_id);
+
 CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
@@ -179,6 +207,38 @@ SCHEMA_MYSQL = [
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_messages_session_id (session_id),
         CONSTRAINT fk_messages_session FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS session_documents (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        session_id VARCHAR(64) NOT NULL,
+        filename VARCHAR(512) NOT NULL,
+        file_type VARCHAR(64) NOT NULL DEFAULT '',
+        file_size BIGINT NOT NULL DEFAULT 0,
+        sha256 VARCHAR(64) NOT NULL,
+        storage_path VARCHAR(1024) NOT NULL DEFAULT '',
+        extracted_text LONGTEXT NOT NULL,
+        summary TEXT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_session_document_hash (session_id, sha256),
+        INDEX idx_session_documents_session_id (session_id),
+        CONSTRAINT fk_session_documents_session FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS session_document_chunks (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        document_id INT NOT NULL,
+        session_id VARCHAR(64) NOT NULL,
+        chunk_index INT NOT NULL,
+        content LONGTEXT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_session_document_chunk (document_id, chunk_index),
+        INDEX idx_session_document_chunks_session_id (session_id),
+        CONSTRAINT fk_session_document_chunks_document FOREIGN KEY (document_id) REFERENCES session_documents(id) ON DELETE CASCADE,
+        CONSTRAINT fk_session_document_chunks_session FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
     """
@@ -503,6 +563,35 @@ def _migrate_sqlite_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(dataset_id, column_name)
         )"""
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS session_documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            filename TEXT NOT NULL,
+            file_type TEXT NOT NULL DEFAULT '',
+            file_size INTEGER NOT NULL DEFAULT 0,
+            sha256 TEXT NOT NULL,
+            storage_path TEXT NOT NULL DEFAULT '',
+            extracted_text TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(session_id, sha256)
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS session_document_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id INTEGER NOT NULL REFERENCES session_documents(id) ON DELETE CASCADE,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            chunk_index INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(document_id, chunk_index)
+        )"""
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_session_documents_session_id ON session_documents(session_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_session_document_chunks_session_id ON session_document_chunks(session_id)")
     conn.execute("UPDATE admin_users SET role = 'initial_admin' WHERE is_initial_admin = 1")
     conn.execute("UPDATE admin_users SET role = 'admin' WHERE role IS NULL OR role = ''")
 

@@ -15,6 +15,7 @@ from ..services.data_profiler import profile_dataset
 from ..services.error_messages import format_analysis_error
 from ..services.meta_router import route_intent
 from ..services.permissions import ensure_dataset_access, first_accessible_dataset_id
+from ..services.session_documents import delete_session_document_files, list_session_documents
 from ..services.reports import (
     apply_chart_options,
     build_docx_report,
@@ -84,6 +85,7 @@ def session_detail(session_id: str, request: Request) -> dict:
         ).fetchall()
     result = dict(session)
     result["messages"] = [_message_dict(row) for row in rows]
+    result["documents"] = list_session_documents(session_id)
     return result
 
 
@@ -97,6 +99,7 @@ def delete_session(session_id: str, request: Request) -> None:
     actor = current_admin(request)
     with connect() as conn:
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+    delete_session_document_files(session_id)
     log_action("delete_session", "session", session_id, "删除历史对话", actor=actor)
 
 
