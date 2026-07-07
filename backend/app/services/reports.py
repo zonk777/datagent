@@ -785,7 +785,11 @@ def build_pdf_report(data: ReportData) -> bytes:
         story.extend([PageBreak(), Paragraph(_section_heading(next_section, "查询结果"), styles["h1"])])
         next_section += 1
         columns = payload.get("columns", [])
-        story.append(_pdf_table(columns, [[row.get(column, "") for column in columns] for row in payload.get("rows", [])], styles))
+        all_rows = payload.get("rows", [])
+        max_show = 10
+        story.append(_pdf_table(columns, [[row.get(column, "") for column in columns] for row in all_rows[:max_show]], styles, max_rows=max_show))
+        if len(all_rows) > max_show:
+            story.append(Paragraph(f"（结果共 {len(all_rows)} 行，PDF 报告仅展示最重要的前 {max_show} 行。）", styles["small"]))
     if payload.get("sql"):
         story.extend([Spacer(1, 8), Paragraph(_section_heading(next_section, "执行 SQL"), styles["h1"]), _p(payload["sql"], styles["small"])])
         next_section += 1
@@ -873,11 +877,13 @@ def build_multi_section_pdf(
                 story.append(Paragraph(line, styles["body"]))
         story.append(Spacer(1, 4 * mm))
 
-        if rows and len(rows) <= 20:
+        if rows and len(rows) <= 10:
             cols = list(rows[0].keys())[:6]
-            story.append(_pdf_table(cols, [[str(r.get(c, "") or "")[:40] for c in cols] for r in rows[:15]], styles, max_rows=15))
+            story.append(_pdf_table(cols, [[str(r.get(c, "") or "")[:40] for c in cols] for r in rows[:10]], styles, max_rows=10))
         elif rows:
-            story.append(Paragraph(f"（共 {len(rows)} 条记录）", styles["small"]))
+            cols = list(rows[0].keys())[:6]
+            story.append(_pdf_table(cols, [[str(r.get(c, "") or "")[:40] for c in cols] for r in rows[:10]], styles, max_rows=10))
+            story.append(Paragraph(f"（该分析维度共 {len(rows)} 条记录，PDF 报告仅展示最重要的前 10 行。）", styles["small"]))
         story.append(PageBreak())
 
     # Appendix

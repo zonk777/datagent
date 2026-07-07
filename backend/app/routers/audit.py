@@ -13,11 +13,13 @@ from ..services.auth import current_admin
 router = APIRouter(prefix="/audit", tags=["audit"])
 
 
-def _require_audit_admin(request: Request) -> dict:
-    actor = current_admin(request)
-    if actor.get("role") not in {"initial_admin", "admin"} and not actor.get("is_initial_admin"):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="当前账号无审计日志查看权限")
-    return actor
+def _require_audit_access(request: Request) -> dict:
+    """All authenticated users can access audit logs, but non-super-admin only see their own."""
+    return current_admin(request)
+
+
+def _is_super_admin(actor: dict) -> bool:
+    return bool(actor.get("is_initial_admin"))
 
 
 @router.get("/logs")
@@ -29,8 +31,15 @@ def audit_logs(
     date_to: str | None = None,
     limit: int = Query(default=200, ge=1, le=1000),
 ) -> list[dict]:
-    _require_audit_admin(request)
-    return list_audit_logs(username=username, action=action, date_from=date_from, date_to=date_to, limit=limit)
+    actor = _require_audit_access(request)
+    # Non-super-admin users can only see their own audit logs
+    restrict_user_id: int | None = None
+    if not _is_super_admin(actor):
+        restrict_user_id = int(actor["id"])
+    return list_audit_logs(
+        username=username, action=action, date_from=date_from, date_to=date_to,
+        limit=limit, user_id=restrict_user_id,
+    )
 
 
 @router.get("/logs/export.xlsx")
@@ -41,8 +50,14 @@ def export_audit_logs(
     date_from: str | None = None,
     date_to: str | None = None,
 ) -> Response:
-    actor = _require_audit_admin(request)
-    rows = list_audit_logs(username=username, action=action, date_from=date_from, date_to=date_to, limit=10000)
+    actor = _require_audit_access(request)
+    restrict_user_id: int | None = None
+    if not _is_super_admin(actor):
+        restrict_user_id = int(actor["id"])
+    rows = list_audit_logs(
+        username=username, action=action, date_from=date_from, date_to=date_to,
+        limit=10000, user_id=restrict_user_id,
+    )
     wb = Workbook()
     ws = wb.active
     ws.title = "审计日志"

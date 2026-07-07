@@ -3,6 +3,8 @@ import { computed, ref } from 'vue'
 import AppIcon from '../components/AppIcon.vue'
 import type { AdminUser, Dataset } from '../types'
 
+import { api } from '../api'
+
 const props = defineProps<{ current: AdminUser | null; admins: AdminUser[]; datasets: Dataset[] }>()
 const emit = defineEmits<{
   create: [f: { username: string; password: string; role: string; dataset_ids: number[] }]
@@ -11,6 +13,55 @@ const emit = defineEmits<{
 }>()
 
 const searchQuery = ref('')
+const showPwdModal = ref(false)
+const pwdForm = ref({ current_password: '', new_password: '', confirm_password: '' })
+const pwdLoading = ref(false)
+const pwdError = ref('')
+const pwdSuccess = ref('')
+const resetPwdTarget = ref<AdminUser | null>(null)
+const resetPwdForm = ref({ new_password: '', confirm_password: '' })
+const resetPwdLoading = ref(false)
+const resetPwdError = ref('')
+
+async function doChangePassword() {
+  pwdError.value = ''
+  pwdSuccess.value = ''
+  if (!pwdForm.value.current_password) { pwdError.value = '请输入当前密码'; return }
+  if (pwdForm.value.new_password.length < 6) { pwdError.value = '新密码至少需要 6 位'; return }
+  if (pwdForm.value.new_password !== pwdForm.value.confirm_password) { pwdError.value = '两次输入的新密码不一致'; return }
+  pwdLoading.value = true
+  try {
+    await api.changePassword(pwdForm.value.current_password, pwdForm.value.new_password)
+    pwdSuccess.value = '密码修改成功'
+    pwdForm.value = { current_password: '', new_password: '', confirm_password: '' }
+  } catch (err: any) {
+    pwdError.value = err.message || '密码修改失败'
+  } finally {
+    pwdLoading.value = false
+  }
+}
+
+function openResetPwd(admin: AdminUser) {
+  resetPwdTarget.value = admin
+  resetPwdForm.value = { new_password: '', confirm_password: '' }
+  resetPwdError.value = ''
+}
+
+async function doResetPassword() {
+  resetPwdError.value = ''
+  if (resetPwdForm.value.new_password.length < 6) { resetPwdError.value = '新密码至少需要 6 位'; return }
+  if (resetPwdForm.value.new_password !== resetPwdForm.value.confirm_password) { resetPwdError.value = '两次输入的新密码不一致'; return }
+  resetPwdLoading.value = true
+  try {
+    await api.resetUserPassword(resetPwdTarget.value!.id, resetPwdForm.value.new_password)
+    resetPwdTarget.value = null
+  } catch (err: any) {
+    resetPwdError.value = err.message || '重置密码失败'
+  } finally {
+    resetPwdLoading.value = false
+  }
+}
+
 const showModal = ref(false)
 const modalMode = ref<'create' | 'edit'>('create')
 const editingId = ref<number | null>(null)
@@ -132,9 +183,14 @@ function cancelDelete() {
           </div>
         </div>
       </div>
-      <button v-if="current?.is_initial_admin" class="primary-btn account-add-btn" @click="openCreate">
-        <AppIcon name="check" :size="14" /> 新增用户
-      </button>
+      <div class="account-header-actions">
+        <button class="secondary-btn account-add-btn" @click="showPwdModal = true">
+          <AppIcon name="settings" :size="14" /> 修改密码
+        </button>
+        <button v-if="current?.is_initial_admin" class="primary-btn account-add-btn" @click="openCreate">
+          <AppIcon name="check" :size="14" /> 新增用户
+        </button>
+      </div>
     </div>
 
     <!-- Main Content Card -->
@@ -217,6 +273,14 @@ function cancelDelete() {
                 <div class="cell-actions">
                   <button class="action-btn edit-btn" title="编辑" @click="openEdit(admin)">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                  </button>
+                  <button
+                    v-if="current?.is_initial_admin && !admin.is_initial_admin"
+                    class="action-btn pwd-btn"
+                    title="重置密码"
+                    @click="openResetPwd(admin)"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
                   </button>
                   <button
                     v-if="current?.is_initial_admin && !admin.is_initial_admin"
@@ -320,6 +384,60 @@ function cancelDelete() {
           </div>
         </div>
       </div>
+      <!-- ── Change Own Password Modal ── -->
+      <div v-if="showPwdModal" class="modal-overlay" @click.self="showPwdModal = false">
+        <div class="modal-panel">
+          <div class="modal-header">
+            <h3>修改密码</h3>
+            <button class="modal-close" @click="showPwdModal = false">&times;</button>
+          </div>
+          <div class="modal-body">
+            <div v-if="pwdError" class="form-error">{{ pwdError }}</div>
+            <div v-if="pwdSuccess" class="form-success">{{ pwdSuccess }}</div>
+            <div class="form-group">
+              <label>当前密码 <span class="required">*</span></label>
+              <input v-model="pwdForm.current_password" type="password" placeholder="请输入当前密码" autocomplete="current-password" />
+            </div>
+            <div class="form-group">
+              <label>新密码 <span class="required">*</span></label>
+              <input v-model="pwdForm.new_password" type="password" placeholder="请输入新密码（至少 6 位）" autocomplete="new-password" />
+            </div>
+            <div class="form-group">
+              <label>确认新密码 <span class="required">*</span></label>
+              <input v-model="pwdForm.confirm_password" type="password" placeholder="请再次输入新密码" autocomplete="new-password" />
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="modal-btn cancel" @click="showPwdModal = false">取消</button>
+            <button class="modal-btn primary" :disabled="pwdLoading" @click="doChangePassword">{{ pwdLoading ? '修改中...' : '确认修改' }}</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Reset User Password Modal ── -->
+      <div v-if="resetPwdTarget" class="modal-overlay" @click.self="resetPwdTarget = null">
+        <div class="modal-panel">
+          <div class="modal-header">
+            <h3>重置密码 — {{ resetPwdTarget.username }}</h3>
+            <button class="modal-close" @click="resetPwdTarget = null">&times;</button>
+          </div>
+          <div class="modal-body">
+            <div v-if="resetPwdError" class="form-error">{{ resetPwdError }}</div>
+            <div class="form-group">
+              <label>新密码 <span class="required">*</span></label>
+              <input v-model="resetPwdForm.new_password" type="password" placeholder="请输入新密码（至少 6 位）" autocomplete="new-password" />
+            </div>
+            <div class="form-group">
+              <label>确认新密码 <span class="required">*</span></label>
+              <input v-model="resetPwdForm.confirm_password" type="password" placeholder="请再次输入新密码" autocomplete="new-password" />
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="modal-btn cancel" @click="resetPwdTarget = null">取消</button>
+            <button class="modal-btn primary" :disabled="resetPwdLoading" @click="doResetPassword">{{ resetPwdLoading ? '重置中...' : '确认重置' }}</button>
+          </div>
+        </div>
+      </div>
     </Teleport>
   </section>
 </template>
@@ -335,6 +453,10 @@ function cancelDelete() {
   margin-bottom: 20px;
 }
 .account-page-title { flex: 1; }
+.account-header-actions {
+  display: flex;
+  gap: 10px;
+}
 .account-add-btn {
   width: auto !important;
   padding: 10px 20px !important;
@@ -343,6 +465,12 @@ function cancelDelete() {
   font-size: 13px !important;
   flex-shrink: 0;
 }
+.form-error { color: #dc2626; font-size: 13px; padding: 8px 12px; background: #fef2f2; border-radius: 6px; margin-bottom: 10px; }
+.form-success { color: #059669; font-size: 13px; padding: 8px 12px; background: #ecfdf5; border-radius: 6px; margin-bottom: 10px; }
+.pwd-btn { color: #7c3aed; }
+.pwd-btn:hover { background: #f5f3ff; color: #6d28d9; }
+.modal-btn.primary { background: #2563eb; color: #fff; border: none; }
+.modal-btn.primary:hover { background: #1d4ed8; }
 
 /* ── Card ── */
 .account-card {

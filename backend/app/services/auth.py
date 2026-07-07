@@ -205,6 +205,39 @@ def update_admin(user_id: int, role: str, dataset_ids: list[int] | None = None) 
     return _public_admin(updated)
 
 
+def change_own_password(actor: dict, current_password: str, new_password: str) -> None:
+    """Allow a logged-in user to change their own password."""
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="新密码至少需要 6 位")
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT password_hash FROM admin_users WHERE id = %s",
+            (actor["id"],),
+        ).fetchone()
+    if not row or not verify_password(current_password, row["password_hash"]):
+        raise HTTPException(status_code=400, detail="当前密码不正确")
+    with connect() as conn:
+        conn.execute(
+            "UPDATE admin_users SET password_hash = %s WHERE id = %s",
+            (hash_password(new_password), actor["id"]),
+        )
+
+
+def reset_user_password(user_id: int, new_password: str) -> dict:
+    """Reset a user's password (initial_admin only)."""
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="新密码至少需要 6 位")
+    with connect() as conn:
+        row = conn.execute("SELECT id, username FROM admin_users WHERE id = %s", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        conn.execute(
+            "UPDATE admin_users SET password_hash = %s WHERE id = %s",
+            (hash_password(new_password), user_id),
+        )
+    return {"id": int(row["id"]), "username": row["username"]}
+
+
 def delete_admin(user_id: int, actor_id: int) -> None:
     if user_id == actor_id:
         raise HTTPException(status_code=400, detail="不能删除当前登录账号")

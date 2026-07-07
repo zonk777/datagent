@@ -1,3 +1,6 @@
+import os
+os.environ.setdefault("no_proxy", "*")  # bypass broken Windows system proxy; httpx reads it early
+
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager

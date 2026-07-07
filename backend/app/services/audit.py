@@ -46,9 +46,13 @@ def list_audit_logs(
     date_from: str | None = None,
     date_to: str | None = None,
     limit: int = 200,
+    user_id: int | None = None,
 ) -> list[dict[str, Any]]:
     filters: list[str] = []
     params: list[Any] = []
+    if user_id is not None:
+        filters.append("user_id = %s")
+        params.append(user_id)
     if username:
         filters.append("username LIKE %s")
         params.append(f"%{username}%")

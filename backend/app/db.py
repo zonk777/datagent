@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
     content TEXT NOT NULL,
     category TEXT NOT NULL DEFAULT 'business_rule',
     dataset_id INTEGER REFERENCES datasets(id) ON DELETE CASCADE,
+    created_by INTEGER REFERENCES admin_users(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -182,6 +183,7 @@ SCHEMA_MYSQL = [
         content LONGTEXT NOT NULL,
         category VARCHAR(64) NOT NULL DEFAULT 'business_rule',
         dataset_id INT NULL,
+        created_by INT NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         CONSTRAINT fk_knowledge_dataset FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -463,12 +465,15 @@ def _return_mysql_connection(conn):
         conn.ping(reconnect=False)
         _mysql_pool.put_nowait(conn)
     except Exception:
-        conn.close()
-        if _mysql_pool is not None:
-            try:
-                _mysql_pool.put_nowait(_create_mysql_conn(get_settings()))
-            except queue.Full:
-                pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+        try:
+            replacement = _create_mysql_conn(get_settings())
+            _mysql_pool.put_nowait(replacement)
+        except Exception:
+            pass  # silently drop dead connections; new ones created on demand
 
 
 def _create_mysql_conn(settings):
@@ -514,11 +519,24 @@ def connect() -> Iterator[Any]:
             db.close()
 
 
+def _migrate_mysql_schema(conn: Any) -> None:
+    """Apply idempotent MySQL schema migrations for columns added after initial release."""
+    migrations = [
+        "ALTER TABLE knowledge_chunks ADD COLUMN created_by INT NULL",
+    ]
+    for stmt in migrations:
+        try:
+            conn.execute(stmt)
+        except Exception:
+            pass  # column already exists
+
+
 def initialize_database() -> None:
     with connect() as conn:
         if using_mysql():
             for statement in SCHEMA_MYSQL:
                 conn.execute(statement)
+            _migrate_mysql_schema(conn)
         else:
             conn.executescript(SCHEMA_SQLITE)
             _migrate_sqlite_schema(conn)
@@ -543,6 +561,8 @@ def _migrate_sqlite_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE sessions ADD COLUMN user_id INTEGER")
     if not _has_sqlite_column(conn, "user_dataset_permissions", "column_mask"):
         conn.execute("ALTER TABLE user_dataset_permissions ADD COLUMN column_mask TEXT")
+    if not _has_sqlite_column(conn, "knowledge_chunks", "created_by"):
+        conn.execute("ALTER TABLE knowledge_chunks ADD COLUMN created_by INTEGER REFERENCES admin_users(id) ON DELETE SET NULL")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS user_dataset_permissions (
             user_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,

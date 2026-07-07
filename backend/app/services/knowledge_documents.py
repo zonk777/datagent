@@ -257,6 +257,7 @@ def import_knowledge_document(
     title: str | None,
     category: str,
     dataset_id: int | None,
+    created_by: int | None = None,
 ) -> list[dict]:
     text = extract_document_text(filename, content)
     chunks = chunk_text(text)
@@ -268,8 +269,8 @@ def import_knowledge_document(
         for index, chunk in enumerate(chunks, 1):
             chunk_title = base_title if len(chunks) == 1 else f"{base_title} - 片段 {index}"
             cursor = conn.execute(
-                "INSERT INTO knowledge_chunks(title, content, category, dataset_id) VALUES (%s, %s, %s, %s)",
-                (chunk_title, chunk, category, dataset_id),
+                "INSERT INTO knowledge_chunks(title, content, category, dataset_id, created_by) VALUES (%s, %s, %s, %s, %s)",
+                (chunk_title, chunk, category, dataset_id, created_by),
             )
             row = conn.execute("SELECT * FROM knowledge_chunks WHERE id = %s", (cursor.lastrowid,)).fetchone()
             inserted.append(dict(row))

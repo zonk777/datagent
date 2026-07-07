@@ -6,6 +6,7 @@ from ..services.audit import log_action
 from ..services.auth import (
     SESSION_COOKIE,
     authenticate,
+    change_own_password,
     create_admin,
     create_session,
     current_admin,
@@ -13,6 +14,7 @@ from ..services.auth import (
     destroy_session,
     list_admins,
     require_initial_admin,
+    reset_user_password,
     update_admin,
 )
 
@@ -53,6 +55,33 @@ def logout(request: Request, response: Response) -> None:
 @router.get("/me")
 def me(request: Request) -> dict:
     return {"admin": current_admin(request)}
+
+
+@router.patch("/me/password")
+def change_password(payload: dict, request: Request) -> dict:
+    """修改当前登录账号的密码。需要提供 current_password 和 new_password。"""
+    actor = current_admin(request)
+    current_password = str(payload.get("current_password") or "")
+    new_password = str(payload.get("new_password") or "")
+    if not current_password or not new_password:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="请提供当前密码和新密码")
+    change_own_password(actor, current_password, new_password)
+    log_action("change_password", "user", actor["id"], "修改密码成功", actor=actor)
+    return {"message": "密码修改成功"}
+
+
+@router.put("/admins/{user_id}/password")
+def reset_password(user_id: int, payload: dict, request: Request) -> dict:
+    """超级管理员重置指定用户的密码。需要提供 new_password。"""
+    actor = require_initial_admin(request)
+    new_password = str(payload.get("new_password") or "")
+    if not new_password:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="请提供新密码")
+    result = reset_user_password(user_id, new_password)
+    log_action("reset_password", "user", user_id, f"重置 {result['username']} 的密码", actor=actor)
+    return {"message": f"已重置 {result['username']} 的密码"}
 
 
 @router.get("/admins")

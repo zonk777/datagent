@@ -12,22 +12,37 @@ from ..services.vector_store import VectorStoreError, delete_knowledge_vectors, 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
 
+def _is_knowledge_super_admin(actor: dict | None) -> bool:
+    if not actor:
+        return False
+    return bool(actor.get("is_initial_admin"))
+
+
 def list_knowledge(dataset_id: int | None = None, actor: dict | None = None) -> list[dict]:
     if dataset_id and actor:
         ensure_dataset_access(actor, dataset_id)
     allowed = accessible_dataset_ids(actor) if actor else None
     params: list[int] = []
+    conditions: list[str] = []
+
     if dataset_id:
-        where = "WHERE dataset_id = %s OR dataset_id IS NULL"
+        conditions.append("(dataset_id = %s OR dataset_id IS NULL)")
         params.append(dataset_id)
     elif allowed is None:
-        where = ""
+        pass  # no dataset filter
     elif allowed:
         placeholders = ",".join("%s" for _ in allowed)
-        where = f"WHERE dataset_id IS NULL OR dataset_id IN ({placeholders})"
+        conditions.append(f"(dataset_id IS NULL OR dataset_id IN ({placeholders}))")
         params.extend(allowed)
     else:
-        where = "WHERE dataset_id IS NULL"
+        conditions.append("dataset_id IS NULL")
+
+    # Privacy: non-super-admin users see their own knowledge + shared (unowned) items
+    if not _is_knowledge_super_admin(actor) and actor:
+        conditions.append("(created_by = %s OR created_by IS NULL)")
+        params.append(int(actor["id"]))
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     with connect() as conn:
         rows = conn.execute(f"SELECT * FROM knowledge_chunks {where} ORDER BY id DESC", params).fetchall()
     return [dict(row) for row in rows]
@@ -45,8 +60,8 @@ async def create_knowledge(payload: KnowledgeCreate, request: Request) -> dict:
         ensure_dataset_access(actor, payload.dataset_id)
     with connect() as conn:
         cursor = conn.execute(
-            "INSERT INTO knowledge_chunks(title, content, category, dataset_id) VALUES (%s, %s, %s, %s)",
-            (payload.title, payload.content, payload.category, payload.dataset_id),
+            "INSERT INTO knowledge_chunks(title, content, category, dataset_id, created_by) VALUES (%s, %s, %s, %s, %s)",
+            (payload.title, payload.content, payload.category, payload.dataset_id, actor["id"]),
         )
         row = conn.execute("SELECT * FROM knowledge_chunks WHERE id = %s", (cursor.lastrowid,)).fetchone()
     result = dict(row)
@@ -78,6 +93,7 @@ async def upload_knowledge_document(
             title=title,
             category=category,
             dataset_id=dataset_id,
+            created_by=actor["id"],
         )
         await sync_knowledge()
     except (ValueError, VectorStoreError) as exc:
@@ -109,9 +125,11 @@ async def update_knowledge(knowledge_id: int, payload: KnowledgeUpdate, request:
     if payload.dataset_id:
         ensure_dataset_access(actor, payload.dataset_id)
     with connect() as conn:
-        row = conn.execute("SELECT id FROM knowledge_chunks WHERE id = %s", (knowledge_id,)).fetchone()
+        row = conn.execute("SELECT id, created_by, dataset_id FROM knowledge_chunks WHERE id = %s", (knowledge_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="知识片段不存在")
+        if not _is_knowledge_super_admin(actor) and row["created_by"] and int(row["created_by"]) != int(actor["id"]):
+            raise HTTPException(status_code=403, detail="无权修改其他用户的知识片段")
         conn.execute(
             "UPDATE knowledge_chunks SET title = %s, content = %s, category = %s, dataset_id = %s WHERE id = %s",
             (payload.title, payload.content, payload.category, payload.dataset_id, knowledge_id),
@@ -128,9 +146,11 @@ async def update_knowledge(knowledge_id: int, payload: KnowledgeUpdate, request:
 def delete_knowledge(knowledge_id: int, request: Request | None = None) -> None:
     actor = require_data_manager(request) if request else None
     with connect() as conn:
-        row = conn.execute("SELECT id, title, dataset_id FROM knowledge_chunks WHERE id = %s", (knowledge_id,)).fetchone()
+        row = conn.execute("SELECT id, title, dataset_id, created_by FROM knowledge_chunks WHERE id = %s", (knowledge_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="知识片段不存在")
+        if actor and not _is_knowledge_super_admin(actor) and row["created_by"] and int(row["created_by"]) != int(actor["id"]):
+            raise HTTPException(status_code=403, detail="无权删除其他用户的知识片段")
         if actor and row["dataset_id"]:
             ensure_dataset_access(actor, int(row["dataset_id"]))
         conn.execute("DELETE FROM knowledge_chunks WHERE id = %s", (knowledge_id,))

@@ -285,6 +285,18 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   deleteAdmin: (id: number) => request<void>(`/auth/admins/${id}`, { method: 'DELETE' }),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ message: string }>('/auth/me/password', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    }),
+  resetUserPassword: (userId: number, newPassword: string) =>
+    request<{ message: string }>(`/auth/admins/${userId}/password`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ new_password: newPassword }),
+    }),
   dashboard: () => request<DashboardData>('/dashboard'),
   config: () => request<ConfigStatus>('/config/status'),
   saveApiSettings: (payload: ApiSettingsPayload) =>
